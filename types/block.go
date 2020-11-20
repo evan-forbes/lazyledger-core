@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gogo/protobuf/proto"
@@ -54,6 +55,8 @@ const (
 // Note that currently we list row and column roots in separate fields
 // (different from the spec).
 type DataAvailabilityHeader struct {
+	// add an extra mutex for parallel computation of the header
+	mtx tmsync.Mutex
 	// RowRoot_j 	= root((M_{j,1} || M_{j,2} || ... || M_{j,2k} ))
 	RowsRoots NmtRoots `json:"row_roots"`
 	// ColumnRoot_j = root((M_{1,j} || M_{2,j} || ... || M_{2k,j} ))
@@ -191,6 +194,19 @@ func (b *Block) fillHeader() {
 	}
 }
 
+// parallelFillHeader fills in any remaining header fields that are a function of the block data. workers dictates how many goroutines will be used
+func (b *Block) parallelFillHeader(workers int) {
+	if b.LastCommitHash == nil {
+		b.LastCommitHash = b.LastCommit.Hash()
+	}
+	if b.DataHash == nil {
+		b.parallelFillDataAvailabilityHeader(workers)
+	}
+	if b.EvidenceHash == nil {
+		b.EvidenceHash = b.Evidence.Hash()
+	}
+}
+
 // fillDataAvailabilityHeader fills in any remaining DataAvailabilityHeader fields
 // that are a function of the block data.
 func (b *Block) fillDataAvailabilityHeader() {
@@ -247,6 +263,86 @@ func (b *Block) fillDataAvailabilityHeader() {
 	b.DataHash = b.DataAvailabilityHeader.Hash()
 }
 
+// parallelFillDataAvailabilityHeader fills in any remaining DataAvailabilityHeader fields
+// that are a function of the block data in a parallel fashion. workers dictates how many goroutines will be used
+func (b *Block) parallelFillDataAvailabilityHeader(workers int) {
+	namespacedShares := b.Data.computeShares()
+	shares := namespacedShares.RawShares()
+	if len(shares) == 0 {
+		// no shares -> no row/colum roots -> hash(empty)
+		b.DataHash = b.DataAvailabilityHeader.Hash()
+		return
+	}
+	// TODO(ismail): for better efficiency and a larger number shares
+	// we should switch to the rsmt2d.LeopardFF16 codec:
+	extendedDataSquare, err := rsmt2d.ComputeExtendedDataSquare(shares, rsmt2d.RSGF8)
+	if err != nil {
+		panic(fmt.Sprintf("unexpected error: %v", err))
+	}
+	// compute roots:
+	squareWidth := extendedDataSquare.Width()
+	originalDataWidth := squareWidth / 2
+	b.DataAvailabilityHeader = DataAvailabilityHeader{
+		mtx:         tmsync.Mutex{},
+		RowsRoots:   make([]namespace.IntervalDigest, squareWidth),
+		ColumnRoots: make([]namespace.IntervalDigest, squareWidth),
+	}
+
+	jobs := make(chan uint, squareWidth)
+	go func() {
+		defer close(jobs)
+		for id := uint(0); id < squareWidth; id++ {
+			jobs <- id
+		}
+	}()
+
+	// compute row and column roots:
+	// TODO(ismail): refactor this to use rsmt2d lib directly instead
+	// depends on https://github.com/lazyledger/rsmt2d/issues/8
+	work := func(wg *sync.WaitGroup, dah *DataAvailabilityHeader, jobs <-chan uint) {
+		defer wg.Done()
+		for outerIdx := range jobs {
+			rowTree := nmt.New(newBaseHashFunc(), nmt.NamespaceIDSize(NamespaceSize))
+			colTree := nmt.New(newBaseHashFunc(), nmt.NamespaceIDSize(NamespaceSize))
+			for innerIdx := uint(0); innerIdx < squareWidth; innerIdx++ {
+				if outerIdx < originalDataWidth && innerIdx < originalDataWidth {
+					mustPush(rowTree, namespacedShares[outerIdx*originalDataWidth+innerIdx])
+					mustPush(colTree, namespacedShares[innerIdx*originalDataWidth+outerIdx])
+				} else {
+					rowData := extendedDataSquare.Row(outerIdx)
+					colData := extendedDataSquare.Column(outerIdx)
+
+					parityCellFromRow := rowData[innerIdx]
+					parityCellFromCol := colData[innerIdx]
+					// FIXME(ismail): do not hardcode usage of PrefixedData8 here:
+					mustPush(rowTree, namespace.PrefixedData8(
+						append(ParitySharesNamespaceID, parityCellFromRow...),
+					))
+					mustPush(colTree, namespace.PrefixedData8(
+						append(ParitySharesNamespaceID, parityCellFromCol...),
+					))
+				}
+			}
+
+			rowRoot := rowTree.Root()
+			colRoot := colTree.Root()
+			dah.mtx.Lock()
+			dah.RowsRoots[outerIdx] = rowRoot
+			dah.ColumnRoots[outerIdx] = colRoot
+			dah.mtx.Unlock()
+		}
+	}
+	wg := &sync.WaitGroup{}
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go work(wg, &b.DataAvailabilityHeader, jobs)
+	}
+
+	wg.Wait()
+
+	b.DataHash = b.DataAvailabilityHeader.Hash()
+}
+
 func mustPush(rowTree *nmt.NamespacedMerkleTree, namespacedShare namespace.Data) {
 	if err := rowTree.Push(namespacedShare); err != nil {
 		panic(
@@ -271,6 +367,23 @@ func (b *Block) Hash() tmbytes.HexBytes {
 		return nil
 	}
 	b.fillHeader()
+	return b.Header.Hash()
+}
+
+// ParallelHash computes and returns the block hash. If the block is incomplete,
+// block hash is nil for safety. workers dictates how many goroutines will be
+// used
+func (b *Block) ParallelHash(workers int) tmbytes.HexBytes {
+	if b == nil {
+		return nil
+	}
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
+
+	if b.LastCommit == nil {
+		return nil
+	}
+	b.parallelFillHeader(workers)
 	return b.Header.Hash()
 }
 

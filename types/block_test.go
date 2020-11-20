@@ -25,6 +25,7 @@ import (
 	tmversion "github.com/lazyledger/lazyledger-core/proto/tendermint/version"
 	tmtime "github.com/lazyledger/lazyledger-core/types/time"
 	"github.com/lazyledger/lazyledger-core/version"
+	"github.com/lazyledger/nmt/namespace"
 )
 
 func TestMain(m *testing.M) {
@@ -48,6 +49,42 @@ func TestBlockAddEvidence(t *testing.T) {
 	require.NotNil(t, block)
 	require.Equal(t, 1, len(block.Evidence.Evidence))
 	require.NotNil(t, block.EvidenceHash)
+}
+
+func TestDataAvailabilityHeaderParallelHash(t *testing.T) {
+	// for now, this is just going to check whether the parallel implemenation
+	// is identical to the single threaded one
+	txs := []Tx{Tx("foo"), Tx("bar")}
+	msgs := []Message{
+		{
+			NamespaceID: namespace.ID("00000000"),
+			Data:        []byte("lots of very important rollup data here"),
+		},
+		{
+			NamespaceID: namespace.ID("00000001"),
+			Data:        []byte("lots of other very important rollup data here"),
+		},
+	}
+	lastID := makeBlockIDRandom()
+	h := int64(3)
+
+	voteSet, valSet, vals := randVoteSet(h-1, 1, tmproto.PrecommitType, 10, 1)
+	commit, err := MakeCommit(lastID, h-1, 1, voteSet, vals, time.Now())
+	require.NoError(t, err)
+
+	ev := NewMockDuplicateVoteEvidenceWithValidator(h, time.Now(), vals[0], "block-test-chain")
+	evList := []Evidence{ev}
+
+	block := MakeBlock(h, txs, evList, nil, msgs, commit)
+	block.ProposerAddress = valSet.GetProposer().Address
+
+	// block.fillDataAvailabilityHeader()
+	// singleHash := block.DataHash
+	block.parallelFillDataAvailabilityHeader(2)
+	multithreadedHash := block.DataHash
+	block.fillDataAvailabilityHeader()
+	singlethreadHash := block.DataHash
+	assert.Equal(t, singlethreadHash, multithreadedHash)
 }
 
 func TestBlockValidateBasic(t *testing.T) {
