@@ -2,6 +2,7 @@ package types
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
@@ -195,67 +196,35 @@ func (b *Block) fillHeader() {
 // that are a function of the block data.
 func (b *Block) fillDataAvailabilityHeader() {
 	namespacedShares := b.Data.computeShares()
-	shares := namespacedShares.RawShares()
-	if len(shares) == 0 {
+	if len(namespacedShares) == 0 {
 		// no shares -> no row/colum roots -> hash(empty)
 		b.DataHash = b.DataAvailabilityHeader.Hash()
 		return
 	}
-	// TODO(ismail): for better efficiency and a larger number shares
-	// we should switch to the rsmt2d.LeopardFF16 codec:
-	extendedDataSquare, err := rsmt2d.ComputeExtendedDataSquare(shares, rsmt2d.RSGF8)
+	rawData, names := namespacedShares.RawShares(), namespacedShares.IDs()
+	// TODO(ismail): for better efficiency and a
+	// larger number shares we should switch to the rsmt2d.LeopardFF16 codec:
+	// erasure the data and assign appropriate namespace IDs after
+	extendedDataSquare, err := rsmt2d.ComputeNamedExtendedDataSquare(rawData, names, rsmt2d.RSGF8)
 	if err != nil {
 		panic(fmt.Sprintf("unexpected error: %v", err))
 	}
-	// compute roots:
-	squareWidth := extendedDataSquare.Width()
-	originalDataWidth := squareWidth / 2
-	b.DataAvailabilityHeader = DataAvailabilityHeader{
-		RowsRoots:   make([]namespace.IntervalDigest, squareWidth),
-		ColumnRoots: make([]namespace.IntervalDigest, squareWidth),
+	// create an nmt VectorCommitmentProver and use the size of the first namespaced share
+	vcp := nmt.NewVCP(extendedDataSquare, sha256.New, nmt.NamespaceIDSize(int(namespacedShares[0].ID.Size())))
+
+	// build the data availability header
+	width := extendedDataSquare.Width()
+	colRoots := make([][]byte, width)
+	rowRoots := make([][]byte, width)
+	for i := uint(0); i < width; i++ {
+		colRoots[i] = vcp.Commitment(rsmt2d.Column, i)
+		rowRoots[i] = vcp.Commitment(rsmt2d.Row, i)
 	}
-
-	// compute row and column roots:
-	// TODO(ismail): refactor this to use rsmt2d lib directly instead
-	// depends on https://github.com/lazyledger/rsmt2d/issues/8
-	for outerIdx := uint(0); outerIdx < squareWidth; outerIdx++ {
-		rowTree := nmt.New(newBaseHashFunc(), nmt.NamespaceIDSize(NamespaceSize))
-		colTree := nmt.New(newBaseHashFunc(), nmt.NamespaceIDSize(NamespaceSize))
-		for innerIdx := uint(0); innerIdx < squareWidth; innerIdx++ {
-			if outerIdx < originalDataWidth && innerIdx < originalDataWidth {
-				mustPush(rowTree, namespacedShares[outerIdx*originalDataWidth+innerIdx])
-				mustPush(colTree, namespacedShares[innerIdx*originalDataWidth+outerIdx])
-			} else {
-				rowData := extendedDataSquare.Row(outerIdx)
-				colData := extendedDataSquare.Column(outerIdx)
-
-				parityCellFromRow := rowData[innerIdx]
-				parityCellFromCol := colData[innerIdx]
-				// FIXME(ismail): do not hardcode usage of PrefixedData8 here:
-				mustPush(rowTree, namespace.PrefixedData8(
-					append(ParitySharesNamespaceID, parityCellFromRow...),
-				))
-				mustPush(colTree, namespace.PrefixedData8(
-					append(ParitySharesNamespaceID, parityCellFromCol...),
-				))
-			}
-		}
-		b.DataAvailabilityHeader.RowsRoots[outerIdx] = rowTree.Root()
-		b.DataAvailabilityHeader.ColumnRoots[outerIdx] = colTree.Root()
-	}
-
-	b.DataHash = b.DataAvailabilityHeader.Hash()
-}
-
-func mustPush(rowTree *nmt.NamespacedMerkleTree, namespacedShare namespace.Data) {
-	if err := rowTree.Push(namespacedShare); err != nil {
-		panic(
-			fmt.Sprintf("invalid data; could not push share to tree: %#v, err: %v",
-				namespacedShare,
-				err,
-			),
-		)
-	}
+	// set the dah roots
+	b.DataAvailabilityHeader.ColumnRoots = NmtRootsFromBytes(colRoots)
+	b.DataAvailabilityHeader.RowsRoots = NmtRootsFromBytes(rowRoots)
+	//  create and set the root hash
+	b.DataHash = merkle.HashFromByteSlices(append(rowRoots, colRoots...))
 }
 
 // Hash computes and returns the block hash.

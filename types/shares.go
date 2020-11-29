@@ -42,6 +42,14 @@ func (ns NamespacedShares) RawShares() [][]byte {
 	return res
 }
 
+func (ns NamespacedShares) IDs() []namespace.ID {
+	ids := make([]namespace.ID, len(ns))
+	for i, nsh := range ns {
+		ids[i] = nsh.ID
+	}
+	return ids
+}
+
 func (tx Tx) MarshalDelimited() ([]byte, error) {
 	lenBuf := make([]byte, binary.MaxVarintLen64)
 	length := uint64(len(tx))
