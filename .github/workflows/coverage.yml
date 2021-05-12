@@ -38,7 +38,7 @@ jobs:
     needs: split-test-files
     steps:
       - uses: actions/checkout@v2
-      - uses: technote-space/get-diff-action@v4
+      - uses: technote-space/get-diff-action@v4.1.1
         with:
           PATTERNS: |
             **/**.go
@@ -62,7 +62,7 @@ jobs:
     needs: split-test-files
     steps:
       - uses: actions/checkout@v2
-      - uses: technote-space/get-diff-action@v4
+      - uses: technote-space/get-diff-action@v4.1.1
         with:
           PATTERNS: |
             **/**.go
@@ -86,7 +86,7 @@ jobs:
     needs: split-test-files
     steps:
       - uses: actions/checkout@v2
-      - uses: technote-space/get-diff-action@v4
+      - uses: technote-space/get-diff-action@v4.1.1
         with:
           PATTERNS: |
             **/**.go
@@ -110,7 +110,7 @@ jobs:
     needs: split-test-files
     steps:
       - uses: actions/checkout@v2
-      - uses: technote-space/get-diff-action@v4
+      - uses: technote-space/get-diff-action@v4.1.1
         with:
           PATTERNS: |
             **/**.go
