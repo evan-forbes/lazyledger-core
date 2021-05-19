@@ -25,7 +25,7 @@ func Load(ctx context.Context, testnet *e2e.Testnet) error {
 	if concurrency == 0 {
 		concurrency = 1
 	}
-	initialTimeout := 1 * time.Minute
+	initialTimeout := 4 * time.Minute
 	stallTimeout := 30 * time.Second
 
 	chTx := make(chan types.Tx)
