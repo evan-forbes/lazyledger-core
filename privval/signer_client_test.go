@@ -11,6 +11,7 @@ import (
 	"github.com/lazyledger/lazyledger-core/crypto"
 	"github.com/lazyledger/lazyledger-core/crypto/tmhash"
 	tmrand "github.com/lazyledger/lazyledger-core/libs/rand"
+	cryptoproto "github.com/lazyledger/lazyledger-core/proto/tendermint/crypto"
 	privvalproto "github.com/lazyledger/lazyledger-core/proto/tendermint/privval"
 	tmproto "github.com/lazyledger/lazyledger-core/proto/tendermint/types"
 	"github.com/lazyledger/lazyledger-core/types"
@@ -124,6 +125,7 @@ func TestSignerProposal(t *testing.T) {
 			POLRound:  2,
 			BlockID:   types.BlockID{Hash: hash, PartSetHeader: types.PartSetHeader{Hash: hash, Total: 2}},
 			Timestamp: ts,
+			DAHeader:  &types.DataAvailabilityHeader{},
 		}
 		want := &types.Proposal{
 			Type:      tmproto.ProposalType,
@@ -132,6 +134,7 @@ func TestSignerProposal(t *testing.T) {
 			POLRound:  2,
 			BlockID:   types.BlockID{Hash: hash, PartSetHeader: types.PartSetHeader{Hash: hash, Total: 2}},
 			Timestamp: ts,
+			DAHeader:  &types.DataAvailabilityHeader{},
 		}
 
 		tc := tc
@@ -146,8 +149,15 @@ func TestSignerProposal(t *testing.T) {
 			}
 		})
 
-		require.NoError(t, tc.mockPV.SignProposal(tc.chainID, want.ToProto()))
-		require.NoError(t, tc.signerClient.SignProposal(tc.chainID, have.ToProto()))
+		p, err := want.ToProto()
+		require.NoError(t, err)
+		err = tc.mockPV.SignProposal(tc.chainID, p)
+		require.NoError(t, err)
+
+		p, err = have.ToProto()
+		require.NoError(t, err)
+		err = tc.signerClient.SignProposal(tc.chainID, p)
+		require.NoError(t, err)
 
 		assert.Equal(t, want.Signature, have.Signature)
 	}
@@ -332,15 +342,22 @@ func TestSignerSignProposalErrors(t *testing.T) {
 			BlockID:   types.BlockID{Hash: hash, PartSetHeader: types.PartSetHeader{Hash: hash, Total: 2}},
 			Timestamp: ts,
 			Signature: []byte("signature"),
+			DAHeader:  &types.DataAvailabilityHeader{},
 		}
 
-		err := tc.signerClient.SignProposal(tc.chainID, proposal.ToProto())
+		p, err := proposal.ToProto()
+		require.NoError(t, err)
+		err = tc.signerClient.SignProposal(tc.chainID, p)
 		require.Equal(t, err.(*RemoteSignerError).Description, types.ErroringMockPVErr.Error())
 
-		err = tc.mockPV.SignProposal(tc.chainID, proposal.ToProto())
+		p, err = proposal.ToProto()
+		require.NoError(t, err)
+		err = tc.mockPV.SignProposal(tc.chainID, p)
 		require.Error(t, err)
 
-		err = tc.signerClient.SignProposal(tc.chainID, proposal.ToProto())
+		p, err = proposal.ToProto()
+		require.NoError(t, err)
+		err = tc.signerClient.SignProposal(tc.chainID, p)
 		require.Error(t, err)
 	}
 }
@@ -396,11 +413,11 @@ func brokenHandler(privVal types.PrivValidator, request privvalproto.Message,
 	switch r := request.Sum.(type) {
 	// This is broken and will answer most requests with a pubkey response
 	case *privvalproto.Message_PubKeyRequest:
-		res = mustWrapMsg(&privvalproto.PubKeyResponse{PubKey: nil, Error: nil})
+		res = mustWrapMsg(&privvalproto.PubKeyResponse{PubKey: cryptoproto.PublicKey{}, Error: nil})
 	case *privvalproto.Message_SignVoteRequest:
-		res = mustWrapMsg(&privvalproto.PubKeyResponse{PubKey: nil, Error: nil})
+		res = mustWrapMsg(&privvalproto.PubKeyResponse{PubKey: cryptoproto.PublicKey{}, Error: nil})
 	case *privvalproto.Message_SignProposalRequest:
-		res = mustWrapMsg(&privvalproto.PubKeyResponse{PubKey: nil, Error: nil})
+		res = mustWrapMsg(&privvalproto.PubKeyResponse{PubKey: cryptoproto.PublicKey{}, Error: nil})
 	case *privvalproto.Message_PingRequest:
 		err, res = nil, mustWrapMsg(&privvalproto.PingResponse{})
 	default:

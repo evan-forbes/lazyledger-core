@@ -1,4 +1,4 @@
-FROM golang:1.14
+FROM golang:1.15
 
 # Grab deps (jq, hexdump, xxd, killall)
 RUN apt-get update && \
@@ -17,9 +17,6 @@ COPY . $REPO
 # Install the vendored dependencies
 # docker caching prevents reinstall on code change!
 RUN make tools
-
-# install ABCI CLI
-RUN make install_abci
 
 # install Tendermint
 RUN make install

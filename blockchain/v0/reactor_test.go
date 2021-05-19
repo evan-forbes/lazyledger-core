@@ -1,6 +1,7 @@
 package v0
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"sort"
@@ -10,10 +11,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	dbm "github.com/tendermint/tm-db"
-
 	abci "github.com/lazyledger/lazyledger-core/abci/types"
 	cfg "github.com/lazyledger/lazyledger-core/config"
+	"github.com/lazyledger/lazyledger-core/libs/db/memdb"
 	"github.com/lazyledger/lazyledger-core/libs/log"
 	"github.com/lazyledger/lazyledger-core/mempool/mock"
 	"github.com/lazyledger/lazyledger-core/p2p"
@@ -68,8 +68,8 @@ func newBlockchainReactor(
 		panic(fmt.Errorf("error start app: %w", err))
 	}
 
-	blockDB := dbm.NewMemDB()
-	stateDB := dbm.NewMemDB()
+	blockDB := memdb.NewDB()
+	stateDB := memdb.NewDB()
 	stateStore := sm.NewStore(stateDB)
 	blockStore := store.NewBlockStore(blockDB)
 
@@ -82,13 +82,17 @@ func newBlockchainReactor(
 	// NOTE we have to create and commit the blocks first because
 	// pool.height is determined from the store.
 	fastSync := true
-	db := dbm.NewMemDB()
+	db := memdb.NewDB()
 	stateStore = sm.NewStore(db)
 	blockExec := sm.NewBlockExecutor(stateStore, log.TestingLogger(), proxyApp.Consensus(),
 		mock.Mempool{}, sm.EmptyEvidencePool{})
 	if err = stateStore.Save(state); err != nil {
 		panic(err)
 	}
+
+	var hash = make([]byte, 32)
+	hh := sha256.Sum256([]byte("Headerhash"))
+	copy(hash, hh[:])
 
 	// let's add some blocks in
 	for blockHeight := int64(1); blockHeight <= maxBlockHeight; blockHeight++ {
@@ -289,7 +293,8 @@ func makeTxs(height int64) (txs []types.Tx) {
 }
 
 func makeBlock(height int64, state sm.State, lastCommit *types.Commit) *types.Block {
-	block, _ := state.MakeBlock(height, makeTxs(height), nil, nil, nil, lastCommit, state.Validators.GetProposer().Address)
+	block, _ := state.MakeBlock(height, makeTxs(height), nil,
+		nil, types.Messages{}, lastCommit, state.Validators.GetProposer().Address)
 	return block
 }
 

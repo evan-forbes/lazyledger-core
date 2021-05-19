@@ -1,12 +1,12 @@
 package mempool
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"io/ioutil"
-	mrand "math/rand"
 	"os"
 	"path/filepath"
 	"testing"
@@ -19,12 +19,10 @@ import (
 
 	"github.com/lazyledger/lazyledger-core/abci/example/counter"
 	"github.com/lazyledger/lazyledger-core/abci/example/kvstore"
-	abciserver "github.com/lazyledger/lazyledger-core/abci/server"
 	abci "github.com/lazyledger/lazyledger-core/abci/types"
 	cfg "github.com/lazyledger/lazyledger-core/config"
 	"github.com/lazyledger/lazyledger-core/libs/log"
 	tmrand "github.com/lazyledger/lazyledger-core/libs/rand"
-	"github.com/lazyledger/lazyledger-core/libs/service"
 	"github.com/lazyledger/lazyledger-core/proxy"
 	"github.com/lazyledger/lazyledger-core/types"
 )
@@ -121,7 +119,7 @@ func TestReapMaxBytesMaxGas(t *testing.T) {
 		{20, 0, -1, 0},
 		{20, 0, 10, 0},
 		{20, 10, 10, 0},
-		{20, 28, 10, 1}, // account for overhead in Data{}
+		{20, 28, 10, 1},
 		{20, 240, 5, 5},
 		{20, 240, -1, 10},
 		{20, 240, 10, 10},
@@ -166,6 +164,7 @@ func TestMempoolFilters(t *testing.T) {
 		{10, nopPreFilter, PostCheckMaxGas(3000), 10},
 		{10, PreCheckMaxBytes(10), PostCheckMaxGas(20), 0},
 		{10, PreCheckMaxBytes(30), PostCheckMaxGas(20), 10},
+		{10, PreCheckMaxBytes(28), PostCheckMaxGas(1), 10},
 		{10, PreCheckMaxBytes(28), PostCheckMaxGas(1), 10},
 		{10, PreCheckMaxBytes(22), PostCheckMaxGas(0), 0},
 	}
@@ -313,11 +312,12 @@ func TestSerialReap(t *testing.T) {
 	}
 
 	commitRange := func(start, end int) {
+		ctx := context.Background()
 		// Deliver some txs.
 		for i := start; i < end; i++ {
 			txBytes := make([]byte, 8)
 			binary.BigEndian.PutUint64(txBytes, uint64(i))
-			res, err := appConnCon.DeliverTxSync(abci.RequestDeliverTx{Tx: txBytes})
+			res, err := appConnCon.DeliverTxSync(ctx, abci.RequestDeliverTx{Tx: txBytes})
 			if err != nil {
 				t.Errorf("client error committing tx: %v", err)
 			}
@@ -326,7 +326,7 @@ func TestSerialReap(t *testing.T) {
 					res.Code, res.Data, res.Log)
 			}
 		}
-		res, err := appConnCon.CommitSync()
+		res, err := appConnCon.CommitSync(ctx)
 		if err != nil {
 			t.Errorf("client error committing: %v", err)
 		}
@@ -520,10 +520,11 @@ func TestMempoolTxsBytes(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	res, err := appConnCon.DeliverTxSync(abci.RequestDeliverTx{Tx: txBytes})
+	ctx := context.Background()
+	res, err := appConnCon.DeliverTxSync(ctx, abci.RequestDeliverTx{Tx: txBytes})
 	require.NoError(t, err)
 	require.EqualValues(t, 0, res.Code)
-	res2, err := appConnCon.CommitSync()
+	res2, err := appConnCon.CommitSync(ctx)
 	require.NoError(t, err)
 	require.NotEmpty(t, res2.Data)
 
@@ -543,68 +544,9 @@ func TestMempoolTxsBytes(t *testing.T) {
 
 }
 
-// This will non-deterministically catch some concurrency failures like
-// https://github.com/lazyledger/lazyledger-core/issues/3509
-// TODO: all of the tests should probably also run using the remote proxy app
-// since otherwise we're not actually testing the concurrency of the mempool here!
-func TestMempoolRemoteAppConcurrency(t *testing.T) {
-	sockPath := fmt.Sprintf("unix:///tmp/echo_%v.sock", tmrand.Str(6))
-	app := kvstore.NewApplication()
-	cc, server := newRemoteApp(t, sockPath, app)
-	t.Cleanup(func() {
-		if err := server.Stop(); err != nil {
-			t.Error(err)
-		}
-	})
-	config := cfg.ResetTestRoot("mempool_test")
-	mempool, cleanup := newMempoolWithAppAndConfig(cc, config)
-	defer cleanup()
-
-	// generate small number of txs
-	nTxs := 10
-	txLen := 200
-	txs := make([]types.Tx, nTxs)
-	for i := 0; i < nTxs; i++ {
-		txs[i] = tmrand.Bytes(txLen)
-	}
-
-	// simulate a group of peers sending them over and over
-	N := config.Mempool.Size
-	maxPeers := 5
-	for i := 0; i < N; i++ {
-		peerID := mrand.Intn(maxPeers)
-		txNum := mrand.Intn(nTxs)
-		tx := txs[txNum]
-
-		// this will err with ErrTxInCache many times ...
-		mempool.CheckTx(tx, nil, TxInfo{SenderID: uint16(peerID)}) //nolint: errcheck // will error
-	}
-	err := mempool.FlushAppConn()
-	require.NoError(t, err)
-}
-
-// caller must close server
-func newRemoteApp(
-	t *testing.T,
-	addr string,
-	app abci.Application,
-) (
-	clientCreator proxy.ClientCreator,
-	server service.Service,
-) {
-	clientCreator = proxy.NewRemoteClientCreator(addr, "socket", true)
-
-	// Start server
-	server = abciserver.NewSocketServer(addr, app)
-	server.SetLogger(log.TestingLogger().With("module", "abci-server"))
-	if err := server.Start(); err != nil {
-		t.Fatalf("Error starting socket server: %v", err.Error())
-	}
-	return clientCreator, server
-}
 func checksumIt(data []byte) string {
 	h := sha256.New()
-	h.Write(data) //nolint: errcheck // ignore errcheck
+	h.Write(data)
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 

@@ -12,11 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	dbm "github.com/tendermint/tm-db"
-
 	abcicli "github.com/lazyledger/lazyledger-core/abci/client"
 	abci "github.com/lazyledger/lazyledger-core/abci/types"
 	"github.com/lazyledger/lazyledger-core/evidence"
+	"github.com/lazyledger/lazyledger-core/libs/db/memdb"
 	"github.com/lazyledger/lazyledger-core/libs/log"
 	"github.com/lazyledger/lazyledger-core/libs/service"
 	tmsync "github.com/lazyledger/lazyledger-core/libs/sync"
@@ -45,7 +44,7 @@ func TestByzantinePrevoteEquivocation(t *testing.T) {
 
 	for i := 0; i < nValidators; i++ {
 		logger := consensusLogger().With("test", "byzantine", "validator", i)
-		stateDB := dbm.NewMemDB() // each state needs its own db
+		stateDB := memdb.NewDB() // each state needs its own db
 		stateStore := sm.NewStore(stateDB)
 		state, _ := stateStore.LoadFromDBOrGenesisDoc(genDoc)
 		thisConfig := ResetConfig(fmt.Sprintf("%s_%d", testName, i))
@@ -55,7 +54,7 @@ func TestByzantinePrevoteEquivocation(t *testing.T) {
 		vals := types.TM2PB.ValidatorUpdates(state.Validators)
 		app.InitChain(abci.RequestInitChain{Validators: vals})
 
-		blockDB := dbm.NewMemDB()
+		blockDB := memdb.NewDB()
 		blockStore := store.NewBlockStore(blockDB)
 
 		// one for mempool, one for consensus
@@ -71,7 +70,7 @@ func TestByzantinePrevoteEquivocation(t *testing.T) {
 		}
 
 		// Make a full instance of the evidence pool
-		evidenceDB := dbm.NewMemDB()
+		evidenceDB := memdb.NewDB()
 		evpool, err := evidence.NewPool(evidenceDB, stateStore, blockStore)
 		require.NoError(t, err)
 		evpool.SetLogger(logger.With("module", "evidence"))
@@ -108,7 +107,7 @@ func TestByzantinePrevoteEquivocation(t *testing.T) {
 		eventBuses[i] = css[i].eventBus
 		reactors[i].SetEventBus(eventBuses[i])
 
-		blocksSub, err := eventBuses[i].Subscribe(context.Background(), testSubscriber, types.EventQueryNewBlock)
+		blocksSub, err := eventBuses[i].Subscribe(context.Background(), testSubscriber, types.EventQueryNewBlock, 100)
 		require.NoError(t, err)
 		blocksSubs = append(blocksSubs, blocksSub)
 
@@ -162,22 +161,22 @@ func TestByzantinePrevoteEquivocation(t *testing.T) {
 	defer stopConsensusNet(log.TestingLogger(), reactors, eventBuses)
 
 	// Evidence should be submitted and committed at the third height but
-	// we will check the first five just in case
+	// we will check the first six just in case
 	evidenceFromEachValidator := make([]types.Evidence, nValidators)
 
 	wg := new(sync.WaitGroup)
 	wg.Add(4)
-	for height := 1; height < 5; height++ {
-		for i := 0; i < nValidators; i++ {
-			go func(j int) {
-				msg := <-blocksSubs[j].Out()
+	for i := 0; i < nValidators; i++ {
+		go func(i int) {
+			for msg := range blocksSubs[i].Out() {
 				block := msg.Data().(types.EventDataNewBlock).Block
 				if len(block.Evidence.Evidence) != 0 {
-					evidenceFromEachValidator[j] = block.Evidence.Evidence[0]
+					evidenceFromEachValidator[i] = block.Evidence.Evidence[0]
 					wg.Done()
+					return
 				}
-			}(i)
-		}
+			}
+		}(i)
 	}
 
 	done := make(chan struct{})
@@ -186,7 +185,8 @@ func TestByzantinePrevoteEquivocation(t *testing.T) {
 		close(done)
 	}()
 
-	pubkey, _ := bcs.privValidator.GetPubKey()
+	pubkey, err := bcs.privValidator.GetPubKey()
+	require.NoError(t, err)
 
 	select {
 	case <-done:
@@ -198,11 +198,11 @@ func TestByzantinePrevoteEquivocation(t *testing.T) {
 				assert.Equal(t, prevoteHeight, ev.Height())
 			}
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(20 * time.Second):
 		for i, reactor := range reactors {
 			t.Logf("Consensus Reactor %d\n%v", i, reactor)
 		}
-		t.Fatalf("Timed out waiting for all validators to commit first block")
+		t.Fatalf("Timed out waiting for validators to commit evidence")
 	}
 }
 
@@ -375,8 +375,9 @@ func byzantineDecideProposalFunc(t *testing.T, height int64, round int32, cs *St
 	// Create a new proposal block from state/txs from the mempool.
 	block1, blockParts1 := cs.createProposalBlock()
 	polRound, propBlockID := cs.ValidRound, types.BlockID{Hash: block1.Hash(), PartSetHeader: blockParts1.Header()}
-	proposal1 := types.NewProposal(height, round, polRound, propBlockID)
-	p1 := proposal1.ToProto()
+	proposal1 := types.NewProposal(height, round, polRound, propBlockID, &block1.DataAvailabilityHeader)
+	p1, err := proposal1.ToProto()
+	require.NoError(t, err)
 	if err := cs.privValidator.SignProposal(cs.state.ChainID, p1); err != nil {
 		t.Error(err)
 	}
@@ -389,8 +390,9 @@ func byzantineDecideProposalFunc(t *testing.T, height int64, round int32, cs *St
 	// Create a new proposal block from state/txs from the mempool.
 	block2, blockParts2 := cs.createProposalBlock()
 	polRound, propBlockID = cs.ValidRound, types.BlockID{Hash: block2.Hash(), PartSetHeader: blockParts2.Header()}
-	proposal2 := types.NewProposal(height, round, polRound, propBlockID)
-	p2 := proposal2.ToProto()
+	proposal2 := types.NewProposal(height, round, polRound, propBlockID, &block2.DataAvailabilityHeader)
+	p2, err := proposal2.ToProto()
+	require.NoError(t, err)
 	if err := cs.privValidator.SignProposal(cs.state.ChainID, p2); err != nil {
 		t.Error(err)
 	}

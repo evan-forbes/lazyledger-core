@@ -1,6 +1,8 @@
 package kvstore
 
 import (
+	mrand "math/rand"
+
 	"github.com/lazyledger/lazyledger-core/abci/types"
 	tmrand "github.com/lazyledger/lazyledger-core/libs/rand"
 )
@@ -9,8 +11,9 @@ import (
 // from the input value
 func RandVal(i int) types.ValidatorUpdate {
 	pubkey := tmrand.Bytes(32)
-	power := tmrand.Uint16() + 1
-	v := types.Ed25519ValidatorUpdate(pubkey, int64(power))
+	// Random value between [0, 2^16 - 1]
+	power := mrand.Uint32() & (1<<16 - 1) // nolint:gosec // G404: Use of weak random number generator
+	v := types.UpdateValidator(pubkey, int64(power), "")
 	return v
 }
 

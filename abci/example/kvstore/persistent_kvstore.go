@@ -7,11 +7,10 @@ import (
 	"strconv"
 	"strings"
 
-	dbm "github.com/tendermint/tm-db"
-
 	"github.com/lazyledger/lazyledger-core/abci/example/code"
 	"github.com/lazyledger/lazyledger-core/abci/types"
 	cryptoenc "github.com/lazyledger/lazyledger-core/crypto/encoding"
+	dbb "github.com/lazyledger/lazyledger-core/libs/db/badgerdb"
 	"github.com/lazyledger/lazyledger-core/libs/log"
 	pc "github.com/lazyledger/lazyledger-core/proto/tendermint/crypto"
 )
@@ -37,7 +36,7 @@ type PersistentKVStoreApplication struct {
 
 func NewPersistentKVStoreApplication(dbDir string) *PersistentKVStoreApplication {
 	name := "kvstore"
-	db, err := dbm.NewGoLevelDB(name, dbDir)
+	db, err := dbb.NewDB(name, dbDir)
 	if err != nil {
 		panic(err)
 	}
@@ -166,6 +165,11 @@ func (app *PersistentKVStoreApplication) ApplySnapshotChunk(
 	return types.ResponseApplySnapshotChunk{Result: types.ResponseApplySnapshotChunk_ABORT}
 }
 
+func (app *PersistentKVStoreApplication) PreprocessTxs(
+	req types.RequestPreprocessTxs) types.ResponsePreprocessTxs {
+	return types.ResponsePreprocessTxs{Txs: req.Txs}
+}
+
 //---------------------------------------------
 // update validators
 
@@ -234,7 +238,7 @@ func (app *PersistentKVStoreApplication) execValidatorTx(tx []byte) types.Respon
 	}
 
 	// update
-	return app.updateValidator(types.Ed25519ValidatorUpdate(pubkey, power))
+	return app.updateValidator(types.UpdateValidator(pubkey, power, ""))
 }
 
 // add, update, or remove a validator

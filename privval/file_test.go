@@ -28,7 +28,8 @@ func TestGenLoadValidator(t *testing.T) {
 	tempStateFile, err := ioutil.TempFile("", "priv_validator_state_")
 	require.Nil(t, err)
 
-	privVal := GenFilePV(tempKeyFile.Name(), tempStateFile.Name())
+	privVal, err := GenFilePV(tempKeyFile.Name(), tempStateFile.Name(), "")
+	require.NoError(t, err)
 
 	height := int64(100)
 	privVal.LastSignState.Height = height
@@ -46,7 +47,8 @@ func TestResetValidator(t *testing.T) {
 	tempStateFile, err := ioutil.TempFile("", "priv_validator_state_")
 	require.Nil(t, err)
 
-	privVal := GenFilePV(tempKeyFile.Name(), tempStateFile.Name())
+	privVal, err := GenFilePV(tempKeyFile.Name(), tempStateFile.Name(), "")
+	require.NoError(t, err)
 	emptyState := FilePVLastSignState{filePath: tempStateFile.Name()}
 
 	// new priv val has empty state
@@ -86,9 +88,11 @@ func TestLoadOrGenValidator(t *testing.T) {
 		t.Error(err)
 	}
 
-	privVal := LoadOrGenFilePV(tempKeyFilePath, tempStateFilePath)
+	privVal, err := LoadOrGenFilePV(tempKeyFilePath, tempStateFilePath)
+	require.NoError(t, err)
 	addr := privVal.GetAddress()
-	privVal = LoadOrGenFilePV(tempKeyFilePath, tempStateFilePath)
+	privVal, err = LoadOrGenFilePV(tempKeyFilePath, tempStateFilePath)
+	require.NoError(t, err)
 	assert.Equal(addr, privVal.GetAddress(), "expected privval addr to be the same")
 }
 
@@ -164,7 +168,8 @@ func TestSignVote(t *testing.T) {
 	tempStateFile, err := ioutil.TempFile("", "priv_validator_state_")
 	require.Nil(t, err)
 
-	privVal := GenFilePV(tempKeyFile.Name(), tempStateFile.Name())
+	privVal, err := GenFilePV(tempKeyFile.Name(), tempStateFile.Name(), "")
+	require.NoError(t, err)
 
 	randbytes := tmrand.Bytes(tmhash.Size)
 	randbytes2 := tmrand.Bytes(tmhash.Size)
@@ -217,7 +222,8 @@ func TestSignProposal(t *testing.T) {
 	tempStateFile, err := ioutil.TempFile("", "priv_validator_state_")
 	require.Nil(t, err)
 
-	privVal := GenFilePV(tempKeyFile.Name(), tempStateFile.Name())
+	privVal, err := GenFilePV(tempKeyFile.Name(), tempStateFile.Name(), "")
+	require.NoError(t, err)
 
 	randbytes := tmrand.Bytes(tmhash.Size)
 	randbytes2 := tmrand.Bytes(tmhash.Size)
@@ -230,7 +236,8 @@ func TestSignProposal(t *testing.T) {
 
 	// sign a proposal for first time
 	proposal := newProposal(height, round, block1)
-	pbp := proposal.ToProto()
+	pbp, err := proposal.ToProto()
+	require.NoError(t, err)
 	err = privVal.SignProposal("mychainid", pbp)
 	assert.NoError(err, "expected no error signing proposal")
 
@@ -247,7 +254,9 @@ func TestSignProposal(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		err = privVal.SignProposal("mychainid", c.ToProto())
+		p, err := c.ToProto()
+		require.NoError(t, err)
+		err = privVal.SignProposal("mychainid", p)
 		assert.Error(err, "expected error on signing conflicting proposal")
 	}
 
@@ -265,7 +274,8 @@ func TestDifferByTimestamp(t *testing.T) {
 	tempStateFile, err := ioutil.TempFile("", "priv_validator_state_")
 	require.Nil(t, err)
 
-	privVal := GenFilePV(tempKeyFile.Name(), tempStateFile.Name())
+	privVal, err := GenFilePV(tempKeyFile.Name(), tempStateFile.Name(), "")
+	require.NoError(t, err)
 	randbytes := tmrand.Bytes(tmhash.Size)
 	block1 := types.BlockID{Hash: randbytes, PartSetHeader: types.PartSetHeader{Total: 5, Hash: randbytes}}
 	height, round := int64(10), int32(1)
@@ -274,8 +284,9 @@ func TestDifferByTimestamp(t *testing.T) {
 	// test proposal
 	{
 		proposal := newProposal(height, round, block1)
-		pb := proposal.ToProto()
-		err := privVal.SignProposal(chainID, pb)
+		pb, err := proposal.ToProto()
+		require.NoError(t, err)
+		err = privVal.SignProposal(chainID, pb)
 		assert.NoError(t, err, "expected no error signing proposal")
 		signBytes := types.ProposalSignBytes(chainID, pb)
 
@@ -339,5 +350,6 @@ func newProposal(height int64, round int32, blockID types.BlockID) *types.Propos
 		Round:     round,
 		BlockID:   blockID,
 		Timestamp: tmtime.Now(),
+		DAHeader:  &types.DataAvailabilityHeader{},
 	}
 }

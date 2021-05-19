@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/lazyledger/lazyledger-core/abci/server"
+	"github.com/spf13/viper"
+
 	"github.com/lazyledger/lazyledger-core/config"
+	"github.com/lazyledger/lazyledger-core/crypto/ed25519"
 	tmflags "github.com/lazyledger/lazyledger-core/libs/cli/flags"
 	"github.com/lazyledger/lazyledger-core/libs/log"
 	tmnet "github.com/lazyledger/lazyledger-core/libs/net"
@@ -16,7 +18,6 @@ import (
 	"github.com/lazyledger/lazyledger-core/p2p"
 	"github.com/lazyledger/lazyledger-core/privval"
 	"github.com/lazyledger/lazyledger-core/proxy"
-	"github.com/spf13/viper"
 )
 
 var logger = log.NewTMLogger(log.NewSyncWriter(os.Stdout))
@@ -57,10 +58,13 @@ func run(configFile string) error {
 
 	// Start app server.
 	switch cfg.Protocol {
-	case "socket", "grpc":
-		err = startApp(cfg)
 	case "builtin":
+		// FIXME: Temporarily remove maverick until it is redesigned
+		// if len(cfg.Misbehaviors) == 0 {
 		err = startNode(cfg)
+		// } else {
+		// 	err = startMaverick(cfg)
+		// }
 	default:
 		err = fmt.Errorf("invalid protocol %q", cfg.Protocol)
 	}
@@ -74,24 +78,6 @@ func run(configFile string) error {
 	}
 }
 
-// startApp starts the application server, listening for connections from Tendermint.
-func startApp(cfg *Config) error {
-	app, err := NewApplication(cfg)
-	if err != nil {
-		return err
-	}
-	server, err := server.NewServer(cfg.Listen, cfg.Protocol, app)
-	if err != nil {
-		return err
-	}
-	err = server.Start()
-	if err != nil {
-		return err
-	}
-	logger.Info(fmt.Sprintf("Server listening on %v (%v protocol)", cfg.Listen, cfg.Protocol))
-	return nil
-}
-
 // startNode starts a Tendermint node running the application directly. It assumes the Tendermint
 // configuration is in $TMHOME/config/tendermint.toml.
 //
@@ -102,53 +88,66 @@ func startNode(cfg *Config) error {
 		return err
 	}
 
-	home := os.Getenv("TMHOME")
-	if home == "" {
-		return errors.New("TMHOME not set")
-	}
-	viper.AddConfigPath(filepath.Join(home, "config"))
-	viper.SetConfigName("config")
-	err = viper.ReadInConfig()
+	tmcfg, nodeLogger, nodeKey, err := setupNode()
 	if err != nil {
-		return err
-	}
-	tmcfg := config.DefaultConfig()
-	err = viper.Unmarshal(tmcfg)
-	if err != nil {
-		return err
-	}
-	tmcfg.SetRoot(home)
-	if err = tmcfg.ValidateBasic(); err != nil {
-		return fmt.Errorf("error in config file: %v", err)
-	}
-	if tmcfg.LogFormat == config.LogFormatJSON {
-		logger = log.NewTMJSONLogger(log.NewSyncWriter(os.Stdout))
-	}
-	logger, err = tmflags.ParseLogLevel(tmcfg.LogLevel, logger, config.DefaultLogLevel())
-	if err != nil {
-		return err
-	}
-	logger = logger.With("module", "main")
-
-	nodeKey, err := p2p.LoadOrGenNodeKey(tmcfg.NodeKeyFile())
-	if err != nil {
-		return fmt.Errorf("failed to load or gen node key %s: %w", tmcfg.NodeKeyFile(), err)
+		return fmt.Errorf("failed to setup config: %w", err)
 	}
 
+	pval, err := privval.LoadOrGenFilePV(tmcfg.PrivValidatorKeyFile(), tmcfg.PrivValidatorStateFile())
+	if err != nil {
+		return err
+	}
 	n, err := node.NewNode(tmcfg,
-		privval.LoadOrGenFilePV(tmcfg.PrivValidatorKeyFile(), tmcfg.PrivValidatorStateFile()),
-		nodeKey,
+		pval,
+		*nodeKey,
 		proxy.NewLocalClientCreator(app),
 		node.DefaultGenesisDocProviderFunc(tmcfg),
 		node.DefaultDBProvider,
 		node.DefaultMetricsProvider(tmcfg.Instrumentation),
-		logger,
+		nodeLogger,
 	)
 	if err != nil {
 		return err
 	}
 	return n.Start()
 }
+
+// FIXME: Temporarily disconnected maverick until it is redesigned
+// startMaverick starts a Maverick node that runs the application directly. It assumes the Tendermint
+// configuration is in $TMHOME/config/tendermint.toml.
+// func startMaverick(cfg *Config) error {
+// 	app, err := NewApplication(cfg)
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	tmcfg, logger, nodeKey, err := setupNode()
+// 	if err != nil {
+// 		return fmt.Errorf("failed to setup config: %w", err)
+// 	}
+
+// 	misbehaviors := make(map[int64]mcs.Misbehavior, len(cfg.Misbehaviors))
+// 	for heightString, misbehaviorString := range cfg.Misbehaviors {
+// 		height, _ := strconv.ParseInt(heightString, 10, 64)
+// 		misbehaviors[height] = mcs.MisbehaviorList[misbehaviorString]
+// 	}
+
+// 	n, err := maverick.NewNode(tmcfg,
+// 		maverick.LoadOrGenFilePV(tmcfg.PrivValidatorKeyFile(), tmcfg.PrivValidatorStateFile()),
+// 		*nodeKey,
+// 		proxy.NewLocalClientCreator(app),
+// 		maverick.DefaultGenesisDocProviderFunc(tmcfg),
+// 		maverick.DefaultDBProvider,
+// 		maverick.DefaultMetricsProvider(tmcfg.Instrumentation),
+// 		logger,
+// 		misbehaviors,
+// 	)
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	return n.Start()
+// }
 
 // startSigner starts a signer server connecting to the given endpoint.
 func startSigner(cfg *Config) error {
@@ -158,7 +157,7 @@ func startSigner(cfg *Config) error {
 	var dialFn privval.SocketDialer
 	switch protocol {
 	case "tcp":
-		dialFn = privval.DialTCPFn(address, 3*time.Second, filePV.Key.PrivKey)
+		dialFn = privval.DialTCPFn(address, 3*time.Second, ed25519.GenPrivKey())
 	case "unix":
 		dialFn = privval.DialUnixFn(address)
 	default:
@@ -174,4 +173,43 @@ func startSigner(cfg *Config) error {
 	}
 	logger.Info(fmt.Sprintf("Remote signer connecting to %v", cfg.PrivValServer))
 	return nil
+}
+
+func setupNode() (*config.Config, log.Logger, *p2p.NodeKey, error) {
+	var tmcfg *config.Config
+
+	home := os.Getenv("TMHOME")
+	if home == "" {
+		return nil, nil, nil, errors.New("TMHOME not set")
+	}
+	viper.AddConfigPath(filepath.Join(home, "config"))
+	viper.SetConfigName("config")
+	err := viper.ReadInConfig()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	tmcfg = config.DefaultConfig()
+	err = viper.Unmarshal(tmcfg)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	tmcfg.SetRoot(home)
+	if err = tmcfg.ValidateBasic(); err != nil {
+		return nil, nil, nil, fmt.Errorf("error in config file: %w", err)
+	}
+	if tmcfg.LogFormat == config.LogFormatJSON {
+		logger = log.NewTMJSONLogger(log.NewSyncWriter(os.Stdout))
+	}
+	nodeLogger, err := tmflags.ParseLogLevel(tmcfg.LogLevel, logger, config.DefaultLogLevel())
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	nodeLogger = nodeLogger.With("module", "main")
+
+	nodeKey, err := p2p.LoadOrGenNodeKey(tmcfg.NodeKeyFile())
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to load or gen node key %s: %w", tmcfg.NodeKeyFile(), err)
+	}
+
+	return tmcfg, nodeLogger, &nodeKey, nil
 }

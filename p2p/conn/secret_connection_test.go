@@ -6,7 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
+	mrand "math/rand"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,7 +23,6 @@ import (
 	"github.com/lazyledger/lazyledger-core/crypto/ed25519"
 	"github.com/lazyledger/lazyledger-core/crypto/sr25519"
 	"github.com/lazyledger/lazyledger-core/libs/async"
-	tmos "github.com/lazyledger/lazyledger-core/libs/os"
 	tmrand "github.com/lazyledger/lazyledger-core/libs/rand"
 )
 
@@ -114,8 +115,8 @@ func TestSecretConnectionReadWrite(t *testing.T) {
 
 	// Pre-generate the things to write (for foo & bar)
 	for i := 0; i < 100; i++ {
-		fooWrites = append(fooWrites, tmrand.Str((tmrand.Int()%(dataMaxSize*5))+1))
-		barWrites = append(barWrites, tmrand.Str((tmrand.Int()%(dataMaxSize*5))+1))
+		fooWrites = append(fooWrites, tmrand.Str((mrand.Int()%(dataMaxSize*5))+1))
+		barWrites = append(barWrites, tmrand.Str((mrand.Int()%(dataMaxSize*5))+1))
 	}
 
 	// A helper that will run with (fooConn, fooWrites, fooReads) and vice versa
@@ -228,14 +229,13 @@ func TestDeriveSecretsAndChallengeGolden(t *testing.T) {
 	if *update {
 		t.Logf("Updating golden test vector file %s", goldenFilepath)
 		data := createGoldenTestVectors(t)
-		err := tmos.WriteFile(goldenFilepath, []byte(data), 0644)
-		require.NoError(t, err)
+		require.NoError(t, ioutil.WriteFile(goldenFilepath, []byte(data), 0644))
 	}
 	f, err := os.Open(goldenFilepath)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer f.Close()
+	t.Cleanup(closeAll(t, f))
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -259,8 +259,7 @@ func TestDeriveSecretsAndChallengeGolden(t *testing.T) {
 
 func TestNilPubkey(t *testing.T) {
 	var fooConn, barConn = makeKVStoreConnPair()
-	defer fooConn.Close()
-	defer barConn.Close()
+	t.Cleanup(closeAll(t, fooConn, barConn))
 	var fooPrvKey = ed25519.GenPrivKey()
 	var barPrvKey = privKeyWithNilPubKey{ed25519.GenPrivKey()}
 
@@ -273,8 +272,8 @@ func TestNilPubkey(t *testing.T) {
 
 func TestNonEd25519Pubkey(t *testing.T) {
 	var fooConn, barConn = makeKVStoreConnPair()
-	defer fooConn.Close()
-	defer barConn.Close()
+	t.Cleanup(closeAll(t, fooConn, barConn))
+
 	var fooPrvKey = ed25519.GenPrivKey()
 	var barPrvKey = sr25519.GenPrivKey()
 
@@ -315,7 +314,7 @@ func createGoldenTestVectors(t *testing.T) string {
 		randSecret := new([32]byte)
 		copy((*randSecret)[:], randSecretVector)
 		data += hex.EncodeToString((*randSecret)[:]) + ","
-		locIsLeast := tmrand.Bool()
+		locIsLeast := mrand.Int63()%2 == 0
 		data += strconv.FormatBool(locIsLeast) + ","
 		recvSecret, sendSecret := deriveSecrets(randSecret, locIsLeast)
 		data += hex.EncodeToString((*recvSecret)[:]) + ","
@@ -415,7 +414,7 @@ func BenchmarkWriteSecretConnection(b *testing.B) {
 
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
-		idx := tmrand.Intn(len(fooWriteBytes))
+		idx := mrand.Intn(len(fooWriteBytes))
 		_, err := fooSecConn.Write(fooWriteBytes[idx])
 		if err != nil {
 			b.Errorf("failed to write to fooSecConn: %v", err)
@@ -449,7 +448,7 @@ func BenchmarkReadSecretConnection(b *testing.B) {
 	}
 	go func() {
 		for i := 0; i < b.N; i++ {
-			idx := tmrand.Intn(len(fooWriteBytes))
+			idx := mrand.Intn(len(fooWriteBytes))
 			_, err := fooSecConn.Write(fooWriteBytes[idx])
 			if err != nil {
 				b.Errorf("failed to write to fooSecConn: %v, %v,%v", err, i, b.N)

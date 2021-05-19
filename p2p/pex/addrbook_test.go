@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"math"
+	mrand "math/rand"
 	"net"
 	"os"
 	"testing"
@@ -22,8 +23,7 @@ import (
 // FIXME These tests should not rely on .(*addrBook) assertions
 
 func TestAddrBookPickAddress(t *testing.T) {
-	fname := createTempFileName("addrbook_test")
-	defer deleteTempFile(fname)
+	fname := createTempFileName(t, "addrbook_test")
 
 	// 0 addresses
 	book := NewAddrBook(fname, true)
@@ -59,8 +59,7 @@ func TestAddrBookPickAddress(t *testing.T) {
 }
 
 func TestAddrBookSaveLoad(t *testing.T) {
-	fname := createTempFileName("addrbook_test")
-	defer deleteTempFile(fname)
+	fname := createTempFileName(t, "addrbook_test")
 
 	// 0 addresses
 	book := NewAddrBook(fname, true)
@@ -94,9 +93,7 @@ func TestAddrBookSaveLoad(t *testing.T) {
 }
 
 func TestAddrBookLookup(t *testing.T) {
-	fname := createTempFileName("addrbook_test")
-	defer deleteTempFile(fname)
-
+	fname := createTempFileName(t, "addrbook_test")
 	randAddrs := randNetAddressPairs(t, 100)
 
 	book := NewAddrBook(fname, true)
@@ -113,9 +110,7 @@ func TestAddrBookLookup(t *testing.T) {
 }
 
 func TestAddrBookPromoteToOld(t *testing.T) {
-	fname := createTempFileName("addrbook_test")
-	defer deleteTempFile(fname)
-
+	fname := createTempFileName(t, "addrbook_test")
 	randAddrs := randNetAddressPairs(t, 100)
 
 	book := NewAddrBook(fname, true)
@@ -157,10 +152,9 @@ func TestAddrBookPromoteToOld(t *testing.T) {
 }
 
 func TestAddrBookHandlesDuplicates(t *testing.T) {
-	fname := createTempFileName("addrbook_test")
-	defer deleteTempFile(fname)
-
+	fname := createTempFileName(t, "addrbook_test")
 	book := NewAddrBook(fname, true)
+
 	book.SetLogger(log.TestingLogger())
 
 	randAddrs := randNetAddressPairs(t, 100)
@@ -194,12 +188,12 @@ func randNetAddressPairs(t *testing.T, n int) []netAddressPair {
 func randIPv4Address(t *testing.T) *p2p.NetAddress {
 	for {
 		ip := fmt.Sprintf("%v.%v.%v.%v",
-			tmrand.Intn(254)+1,
-			tmrand.Intn(255),
-			tmrand.Intn(255),
-			tmrand.Intn(255),
+			mrand.Intn(254)+1,
+			mrand.Intn(255),
+			mrand.Intn(255),
+			mrand.Intn(255),
 		)
-		port := tmrand.Intn(65535-1) + 1
+		port := mrand.Intn(65535-1) + 1
 		id := p2p.ID(hex.EncodeToString(tmrand.Bytes(p2p.IDByteLength)))
 		idAddr := p2p.IDAddressString(id, fmt.Sprintf("%v:%v", ip, port))
 		addr, err := p2p.NewNetAddressString(idAddr)
@@ -211,9 +205,7 @@ func randIPv4Address(t *testing.T) *p2p.NetAddress {
 }
 
 func TestAddrBookRemoveAddress(t *testing.T) {
-	fname := createTempFileName("addrbook_test")
-	defer deleteTempFile(fname)
-
+	fname := createTempFileName(t, "addrbook_test")
 	book := NewAddrBook(fname, true)
 	book.SetLogger(log.TestingLogger())
 
@@ -232,9 +224,7 @@ func TestAddrBookRemoveAddress(t *testing.T) {
 
 func TestAddrBookGetSelectionWithOneMarkedGood(t *testing.T) {
 	// create a book with 10 addresses, 1 good/old and 9 new
-	book, fname := createAddrBookWithMOldAndNNewAddrs(t, 1, 9)
-	defer deleteTempFile(fname)
-
+	book, _ := createAddrBookWithMOldAndNNewAddrs(t, 1, 9)
 	addrs := book.GetSelectionWithBias(biasToSelectNewPeers)
 	assert.NotNil(t, addrs)
 	assertMOldAndNNewAddrsInSelection(t, 1, 9, addrs, book)
@@ -242,26 +232,20 @@ func TestAddrBookGetSelectionWithOneMarkedGood(t *testing.T) {
 
 func TestAddrBookGetSelectionWithOneNotMarkedGood(t *testing.T) {
 	// create a book with 10 addresses, 9 good/old and 1 new
-	book, fname := createAddrBookWithMOldAndNNewAddrs(t, 9, 1)
-	defer deleteTempFile(fname)
-
+	book, _ := createAddrBookWithMOldAndNNewAddrs(t, 9, 1)
 	addrs := book.GetSelectionWithBias(biasToSelectNewPeers)
 	assert.NotNil(t, addrs)
 	assertMOldAndNNewAddrsInSelection(t, 9, 1, addrs, book)
 }
 
 func TestAddrBookGetSelectionReturnsNilWhenAddrBookIsEmpty(t *testing.T) {
-	book, fname := createAddrBookWithMOldAndNNewAddrs(t, 0, 0)
-	defer deleteTempFile(fname)
-
+	book, _ := createAddrBookWithMOldAndNNewAddrs(t, 0, 0)
 	addrs := book.GetSelectionWithBias(biasToSelectNewPeers)
 	assert.Nil(t, addrs)
 }
 
 func TestAddrBookGetSelection(t *testing.T) {
-	fname := createTempFileName("addrbook_test")
-	defer deleteTempFile(fname)
-
+	fname := createTempFileName(t, "addrbook_test")
 	book := NewAddrBook(fname, true)
 	book.SetLogger(log.TestingLogger())
 
@@ -301,9 +285,7 @@ func TestAddrBookGetSelection(t *testing.T) {
 func TestAddrBookGetSelectionWithBias(t *testing.T) {
 	const biasTowardsNewAddrs = 30
 
-	fname := createTempFileName("addrbook_test")
-	defer deleteTempFile(fname)
-
+	fname := createTempFileName(t, "addrbook_test")
 	book := NewAddrBook(fname, true)
 	book.SetLogger(log.TestingLogger())
 
@@ -384,9 +366,7 @@ func TestAddrBookGetSelectionWithBias(t *testing.T) {
 }
 
 func TestAddrBookHasAddress(t *testing.T) {
-	fname := createTempFileName("addrbook_test")
-	defer deleteTempFile(fname)
-
+	fname := createTempFileName(t, "addrbook_test")
 	book := NewAddrBook(fname, true)
 	book.SetLogger(log.TestingLogger())
 	addr := randIPv4Address(t)
@@ -401,6 +381,7 @@ func TestAddrBookHasAddress(t *testing.T) {
 }
 
 func testCreatePrivateAddrs(t *testing.T, numAddrs int) ([]*p2p.NetAddress, []string) {
+	t.Helper()
 	addrs := make([]*p2p.NetAddress, numAddrs)
 	for i := 0; i < numAddrs; i++ {
 		addrs[i] = randIPv4Address(t)
@@ -414,9 +395,7 @@ func testCreatePrivateAddrs(t *testing.T, numAddrs int) ([]*p2p.NetAddress, []st
 }
 
 func TestBanBadPeers(t *testing.T) {
-	fname := createTempFileName("addrbook_test")
-	defer deleteTempFile(fname)
-
+	fname := createTempFileName(t, "addrbook_test")
 	book := NewAddrBook(fname, true)
 	book.SetLogger(log.TestingLogger())
 
@@ -441,9 +420,7 @@ func TestBanBadPeers(t *testing.T) {
 }
 
 func TestAddrBookEmpty(t *testing.T) {
-	fname := createTempFileName("addrbook_test")
-	defer deleteTempFile(fname)
-
+	fname := createTempFileName(t, "addrbook_test")
 	book := NewAddrBook(fname, true)
 	book.SetLogger(log.TestingLogger())
 	// Check that empty book is empty
@@ -463,9 +440,7 @@ func TestAddrBookEmpty(t *testing.T) {
 }
 
 func TestPrivatePeers(t *testing.T) {
-	fname := createTempFileName("addrbook_test")
-	defer deleteTempFile(fname)
-
+	fname := createTempFileName(t, "addrbook_test")
 	book := NewAddrBook(fname, true)
 	book.SetLogger(log.TestingLogger())
 
@@ -496,8 +471,7 @@ func testAddrBookAddressSelection(t *testing.T, bookSize int) {
 		dbgStr := fmt.Sprintf("book of size %d (new %d, old %d)", bookSize, nBookNew, nBookOld)
 
 		// create book and get selection
-		book, fname := createAddrBookWithMOldAndNNewAddrs(t, nBookOld, nBookNew)
-		defer deleteTempFile(fname)
+		book, _ := createAddrBookWithMOldAndNNewAddrs(t, nBookOld, nBookNew)
 		addrs := book.GetSelectionWithBias(biasToSelectNewPeers)
 		assert.NotNil(t, addrs, "%s - expected a non-nil selection", dbgStr)
 		nAddrs := len(addrs)
@@ -581,7 +555,7 @@ func TestMultipleAddrBookAddressSelection(t *testing.T) {
 	ranges := [...][]int{{33, 100}, {100, 175}}
 	bookSizes := make([]int, 0, len(ranges))
 	for _, r := range ranges {
-		bookSizes = append(bookSizes, tmrand.Intn(r[1]-r[0])+r[0])
+		bookSizes = append(bookSizes, mrand.Intn(r[1]-r[0])+r[0])
 	}
 	t.Logf("Testing address selection for the following book sizes %v\n", bookSizes)
 	for _, bookSize := range bookSizes {
@@ -590,8 +564,7 @@ func TestMultipleAddrBookAddressSelection(t *testing.T) {
 }
 
 func TestAddrBookAddDoesNotOverwriteOldIP(t *testing.T) {
-	fname := createTempFileName("addrbook_test")
-	defer deleteTempFile(fname)
+	fname := createTempFileName(t, "addrbook_test")
 
 	// This test creates adds a peer to the address book and marks it good
 	// It then attempts to override the peer's IP, by adding a peer with the same ID
@@ -717,28 +690,26 @@ func assertMOldAndNNewAddrsInSelection(t *testing.T, m, n int, addrs []*p2p.NetA
 	assert.Equal(t, n, nNew, "new addresses")
 }
 
-func createTempFileName(prefix string) string {
+func createTempFileName(t *testing.T, prefix string) string {
+	t.Helper()
 	f, err := ioutil.TempFile("", prefix)
 	if err != nil {
 		panic(err)
 	}
+
 	fname := f.Name()
-	err = f.Close()
-	if err != nil {
-		panic(err)
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
 	}
+
+	t.Cleanup(func() { _ = os.Remove(fname) })
+
 	return fname
 }
 
-func deleteTempFile(fname string) {
-	err := os.Remove(fname)
-	if err != nil {
-		panic(err)
-	}
-}
-
 func createAddrBookWithMOldAndNNewAddrs(t *testing.T, nOld, nNew int) (book *addrBook, fname string) {
-	fname = createTempFileName("addrbook_test")
+	t.Helper()
+	fname = createTempFileName(t, "addrbook_test")
 
 	book = NewAddrBook(fname, true).(*addrBook)
 	book.SetLogger(log.TestingLogger())
@@ -771,7 +742,7 @@ func countOldAndNewAddrsInSelection(addrs []*p2p.NetAddress, book *addrBook) (nO
 	return
 }
 
-// Analyse the layout of the selection specified by 'addrs'
+// Analyze the layout of the selection specified by 'addrs'
 // Returns:
 // - seqLens - the lengths of the sequences of addresses of same type
 // - seqTypes - the types of sequences in selection

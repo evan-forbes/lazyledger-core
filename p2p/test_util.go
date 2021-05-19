@@ -2,11 +2,11 @@ package p2p
 
 import (
 	"fmt"
+	mrand "math/rand"
 	"net"
 	"time"
 
 	"github.com/lazyledger/lazyledger-core/crypto"
-	"github.com/lazyledger/lazyledger-core/crypto/ed25519"
 	"github.com/lazyledger/lazyledger-core/libs/log"
 	tmnet "github.com/lazyledger/lazyledger-core/libs/net"
 	tmrand "github.com/lazyledger/lazyledger-core/libs/rand"
@@ -47,15 +47,16 @@ func CreateRandomPeer(outbound bool) Peer {
 	return p
 }
 
+// nolint:gosec // G404: Use of weak random number generator
 func CreateRoutableAddr() (addr string, netAddr *NetAddress) {
 	for {
 		var err error
 		addr = fmt.Sprintf("%X@%v.%v.%v.%v:26656",
 			tmrand.Bytes(20),
-			tmrand.Int()%256,
-			tmrand.Int()%256,
-			tmrand.Int()%256,
-			tmrand.Int()%256)
+			mrand.Int()%256,
+			mrand.Int()%256,
+			mrand.Int()%256,
+			mrand.Int()%256)
 		netAddr, err = NewNetAddressString(addr)
 		if err != nil {
 			panic(err)
@@ -181,12 +182,10 @@ func MakeSwitch(
 	opts ...SwitchOption,
 ) *Switch {
 
-	nodeKey := NodeKey{
-		PrivKey: ed25519.GenPrivKey(),
-	}
-	nodeInfo := testNodeInfo(nodeKey.ID(), fmt.Sprintf("node%d", i))
+	nodeKey := GenNodeKey()
+	nodeInfo := testNodeInfo(nodeKey.ID, fmt.Sprintf("node%d", i))
 	addr, err := NewNetAddressString(
-		IDAddressString(nodeKey.ID(), nodeInfo.(DefaultNodeInfo).ListenAddr),
+		IDAddressString(nodeKey.ID, nodeInfo.(DefaultNodeInfo).ListenAddr),
 	)
 	if err != nil {
 		panic(err)
@@ -201,7 +200,7 @@ func MakeSwitch(
 	// TODO: let the config be passed in?
 	sw := initSwitch(i, NewSwitch(cfg, t, opts...))
 	sw.SetLogger(log.TestingLogger().With("switch", i))
-	sw.SetNodeKey(&nodeKey)
+	sw.SetNodeKey(nodeKey)
 
 	ni := nodeInfo.(DefaultNodeInfo)
 	for ch := range sw.reactorsByCh {
@@ -233,12 +232,6 @@ func testPeerConn(
 	socketAddr *NetAddress,
 ) (pc peerConn, err error) {
 	conn := rawConn
-
-	// Fuzz connection
-	if cfg.TestFuzz {
-		// so we have time to do peer handshakes and get set up
-		conn = FuzzConnAfterFromConfig(conn, 10*time.Second, cfg.TestFuzzConfig)
-	}
 
 	// Encrypt connection
 	conn, err = upgradeSecretConn(conn, cfg.HandshakeTimeout, ourNodePrivKey)

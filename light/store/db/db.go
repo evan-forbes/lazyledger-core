@@ -6,8 +6,7 @@ import (
 	"regexp"
 	"strconv"
 
-	dbm "github.com/tendermint/tm-db"
-
+	dbm "github.com/lazyledger/lazyledger-core/libs/db"
 	tmsync "github.com/lazyledger/lazyledger-core/libs/sync"
 	"github.com/lazyledger/lazyledger-core/light/store"
 	tmproto "github.com/lazyledger/lazyledger-core/proto/tendermint/types"
@@ -238,7 +237,7 @@ func (s *dbs) Prune(size uint16) error {
 		append(s.lbKey(1<<63-1), byte(0x00)),
 	)
 	if err != nil {
-		return err
+		panic(err)
 	}
 	defer itr.Close()
 

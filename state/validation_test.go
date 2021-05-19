@@ -84,7 +84,7 @@ func TestValidateBlockHeader(t *testing.T) {
 			Invalid blocks don't pass
 		*/
 		for _, tc := range testCases {
-			block, _ := state.MakeBlock(height, makeTxs(height), nil, nil, nil, lastCommit, proposerAddr)
+			block, _ := state.MakeBlock(height, makeTxs(height), nil, nil, types.Messages{}, lastCommit, proposerAddr)
 			tc.malleateBlock(block)
 			err := blockExec.ValidateBlock(state, block)
 			t.Logf("%s: %v", tc.name, err)
@@ -95,14 +95,15 @@ func TestValidateBlockHeader(t *testing.T) {
 			A good block passes
 		*/
 		var err error
-		state, _, lastCommit, err = makeAndCommitGoodBlock(state, height, lastCommit, proposerAddr, blockExec, privVals, nil)
+		state, _, lastCommit, err = makeAndCommitGoodBlock(state, height,
+			lastCommit, proposerAddr, blockExec, privVals, nil)
 		require.NoError(t, err, "height %d", height)
 	}
 
 	nextHeight := validationTestsStopHeight
 	block, _ := state.MakeBlock(
 		nextHeight,
-		makeTxs(nextHeight), nil, nil, nil,
+		makeTxs(nextHeight), nil, nil, types.Messages{},
 		lastCommit,
 		state.Validators.GetProposer().Address,
 	)
@@ -152,7 +153,7 @@ func TestValidateBlockCommit(t *testing.T) {
 				state.LastBlockID,
 				[]types.CommitSig{wrongHeightVote.CommitSig()},
 			)
-			block, _ := state.MakeBlock(height, makeTxs(height), nil, nil, nil, wrongHeightCommit, proposerAddr)
+			block, _ := state.MakeBlock(height, makeTxs(height), nil, nil, types.Messages{}, wrongHeightCommit, proposerAddr)
 			err = blockExec.ValidateBlock(state, block)
 			_, isErrInvalidCommitHeight := err.(types.ErrInvalidCommitHeight)
 			require.True(t, isErrInvalidCommitHeight, "expected ErrInvalidCommitHeight at height %d but got: %v", height, err)
@@ -160,7 +161,7 @@ func TestValidateBlockCommit(t *testing.T) {
 			/*
 				#2589: test len(block.LastCommit.Signatures) == state.LastValidators.Size()
 			*/
-			block, _ = state.MakeBlock(height, makeTxs(height), nil, nil, nil, wrongSigsCommit, proposerAddr)
+			block, _ = state.MakeBlock(height, makeTxs(height), nil, nil, types.Messages{}, wrongSigsCommit, proposerAddr)
 			err = blockExec.ValidateBlock(state, block)
 			_, isErrInvalidCommitSignatures := err.(types.ErrInvalidCommitSignatures)
 			require.True(t, isErrInvalidCommitSignatures,
@@ -173,8 +174,10 @@ func TestValidateBlockCommit(t *testing.T) {
 		/*
 			A good block passes
 		*/
-		var err error
-		var blockID types.BlockID
+		var (
+			err     error
+			blockID types.BlockID
+		)
 		state, blockID, lastCommit, err = makeAndCommitGoodBlock(
 			state,
 			height,
@@ -237,7 +240,7 @@ func TestValidateBlockEvidence(t *testing.T) {
 
 	evpool := &mocks.EvidencePool{}
 	evpool.On("CheckEvidence", mock.AnythingOfType("types.EvidenceList")).Return(nil)
-	evpool.On("Update", mock.AnythingOfType("state.State")).Return()
+	evpool.On("Update", mock.AnythingOfType("state.State"), mock.AnythingOfType("types.EvidenceList")).Return()
 	evpool.On("ABCIEvidence", mock.AnythingOfType("int64"), mock.AnythingOfType("[]types.Evidence")).Return(
 		[]abci.Evidence{})
 
@@ -267,7 +270,7 @@ func TestValidateBlockEvidence(t *testing.T) {
 				evidence = append(evidence, newEv)
 				currentBytes += int64(len(newEv.Bytes()))
 			}
-			block, _ := state.MakeBlock(height, makeTxs(height), evidence, nil, nil, lastCommit, proposerAddr)
+			block, _ := state.MakeBlock(height, makeTxs(height), evidence, nil, types.Messages{}, lastCommit, proposerAddr)
 			err := blockExec.ValidateBlock(state, block)
 			if assert.Error(t, err) {
 				_, ok := err.(*types.ErrEvidenceOverflow)
@@ -292,6 +295,7 @@ func TestValidateBlockEvidence(t *testing.T) {
 		}
 
 		var err error
+
 		state, _, lastCommit, err = makeAndCommitGoodBlock(
 			state,
 			height,

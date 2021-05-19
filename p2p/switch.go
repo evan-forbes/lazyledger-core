@@ -3,12 +3,13 @@ package p2p
 import (
 	"fmt"
 	"math"
+	mrand "math/rand"
 	"sync"
 	"time"
 
 	"github.com/lazyledger/lazyledger-core/config"
 	"github.com/lazyledger/lazyledger-core/libs/cmap"
-	"github.com/lazyledger/lazyledger-core/libs/rand"
+	tmrand "github.com/lazyledger/lazyledger-core/libs/rand"
 	"github.com/lazyledger/lazyledger-core/libs/service"
 	"github.com/lazyledger/lazyledger-core/p2p/conn"
 )
@@ -76,7 +77,7 @@ type Switch struct {
 	dialing      *cmap.CMap
 	reconnecting *cmap.CMap
 	nodeInfo     NodeInfo // our node info
-	nodeKey      *NodeKey // our node privkey
+	nodeKey      NodeKey  // our node privkey
 	addrBook     AddrBook
 	// peers addresses with whom we'll maintain constant connection
 	persistentPeersAddrs []*NetAddress
@@ -86,8 +87,6 @@ type Switch struct {
 
 	filterTimeout time.Duration
 	peerFilters   []PeerFilterFunc
-
-	rng *rand.Rand // seed for randomizing dial times and orders
 
 	metrics *Metrics
 }
@@ -122,8 +121,8 @@ func NewSwitch(
 		unconditionalPeerIDs: make(map[ID]struct{}),
 	}
 
-	// Ensure we have a completely undeterministic PRNG.
-	sw.rng = rand.NewRand()
+	// Ensure PRNG is reseeded.
+	tmrand.Reseed()
 
 	sw.BaseService = *service.NewBaseService(nil, "P2P Switch", sw)
 
@@ -212,7 +211,7 @@ func (sw *Switch) NodeInfo() NodeInfo {
 
 // SetNodeKey sets the switch's private key for authenticated encryption.
 // NOTE: Not goroutine safe.
-func (sw *Switch) SetNodeKey(nodeKey *NodeKey) {
+func (sw *Switch) SetNodeKey(nodeKey NodeKey) {
 	sw.nodeKey = nodeKey
 }
 
@@ -322,6 +321,10 @@ func (sw *Switch) Peers() IPeerSet {
 // If the peer is persistent, it will attempt to reconnect.
 // TODO: make record depending on reason.
 func (sw *Switch) StopPeerForError(peer Peer, reason interface{}) {
+	if !peer.IsRunning() {
+		return
+	}
+
 	sw.Logger.Error("Stopping peer for error", "peer", peer, "err", reason)
 	sw.stopAndRemovePeer(peer, reason)
 
@@ -499,7 +502,7 @@ func (sw *Switch) dialPeersAsync(netAddrs []*NetAddress) {
 	}
 
 	// permute the list, dial them in random order.
-	perm := sw.rng.Perm(len(netAddrs))
+	perm := mrand.Perm(len(netAddrs))
 	for i := 0; i < len(perm); i++ {
 		go func(i int) {
 			j := perm[i]
@@ -542,7 +545,8 @@ func (sw *Switch) DialPeerWithAddress(addr *NetAddress) error {
 
 // sleep for interval plus some random amount of ms on [0, dialRandomizerIntervalMilliseconds]
 func (sw *Switch) randomSleep(interval time.Duration) {
-	r := time.Duration(sw.rng.Int63n(dialRandomizerIntervalMilliseconds)) * time.Millisecond
+	// nolint:gosec // G404: Use of weak random number generator
+	r := time.Duration(mrand.Int63n(dialRandomizerIntervalMilliseconds)) * time.Millisecond
 	time.Sleep(r + interval)
 }
 

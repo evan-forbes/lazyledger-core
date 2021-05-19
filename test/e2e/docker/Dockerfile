@@ -7,7 +7,7 @@ RUN apt-get -qq update -y && apt-get -qq upgrade -y >/dev/null
 RUN apt-get -qq install -y libleveldb-dev librocksdb-dev >/dev/null
 
 # Set up build directory /src/tendermint
-ENV TENDERMINT_BUILD_OPTIONS badgerdb,boltdb,cleveldb,rocksdb
+ENV TENDERMINT_BUILD_OPTIONS badgerdb
 WORKDIR /src/tendermint
 
 # Fetch dependencies separately (for layer caching)
@@ -18,6 +18,8 @@ RUN go mod download
 COPY . .
 RUN make build && cp build/tendermint /usr/bin/tendermint
 COPY test/e2e/docker/entrypoint* /usr/bin/
+# FIXME: Temporarily disconnect maverick node until it is redesigned
+# RUN cd test/e2e && make maverick && cp build/maverick /usr/bin/maverick
 RUN cd test/e2e && make app && cp build/app /usr/bin/app
 
 # Set up runtime directory. We don't use a separate runtime image since we need
@@ -28,5 +30,5 @@ ENV TMHOME=/tendermint
 
 EXPOSE 26656 26657 26660
 ENTRYPOINT ["/usr/bin/entrypoint"]
-CMD ["node"]
+CMD ["start"]
 STOPSIGNAL SIGTERM

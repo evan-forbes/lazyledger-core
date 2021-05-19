@@ -46,6 +46,10 @@ type Manifest struct {
 
 	// Nodes specifies the network nodes. At least one node must be given.
 	Nodes map[string]*ManifestNode `toml:"node"`
+
+	// KeyType sets the curve that will be used by validators.
+	// Options are ed25519 & secp256k1
+	KeyType string `toml:"key_type"`
 }
 
 // ManifestNode represents a node in a testnet manifest.
@@ -63,12 +67,9 @@ type ManifestNode struct {
 	// this defaults to all other nodes in the network.
 	PersistentPeers []string `toml:"persistent_peers"`
 
-	// Database specifies the database backend: "goleveldb", "cleveldb",
-	// "rocksdb", "boltdb", or "badgerdb". Defaults to goleveldb.
-	Database string `toml:"database"`
-
+	// TODO: remove this config flag completely -> only builtin allowed now anyways
 	// ABCIProtocol specifies the protocol used to communicate with the ABCI
-	// application: "unix", "tcp", "grpc", or "builtin". Defaults to unix.
+	// application: "unix", "tcp", "grpc", or "builtin". Defaults to builtin.
 	// builtin will build a complete Tendermint node into the application and
 	// launch it instead of launching a separate Tendermint process.
 	ABCIProtocol string `toml:"abci_protocol"`
@@ -83,7 +84,7 @@ type ManifestNode struct {
 	// runner will wait for the network to reach at least this block height.
 	StartAt int64 `toml:"start_at"`
 
-	// FastSync specifies the fast sync mode: "" (disable), "v0", "v1", or "v2".
+	// FastSync specifies the fast sync mode: "" (disable), "v0"
 	// Defaults to disabled.
 	FastSync string `toml:"fast_sync"`
 
@@ -115,6 +116,16 @@ type ManifestNode struct {
 	// pause:      temporarily pauses (freezes) the node
 	// restart:    restarts the node, shutting it down with SIGTERM
 	Perturb []string `toml:"perturb"`
+
+	// Misbehaviors sets how a validator behaves during consensus at a
+	// certain height. Multiple misbehaviors at different heights can be used
+	//
+	// An example of misbehaviors
+	//    { 10 = "double-prevote", 20 = "double-prevote"}
+	//
+	// For more information, look at the readme in the maverick folder.
+	// A list of all behaviors can be found in ../maverick/consensus/behavior.go
+	Misbehaviors map[string]string `toml:"misbehaviors"`
 }
 
 // Save saves the testnet manifest to a file.

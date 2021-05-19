@@ -12,11 +12,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/lazyledger/lazyledger-core/cmd/tendermint/commands"
 	"github.com/lazyledger/lazyledger-core/config"
 	"github.com/lazyledger/lazyledger-core/crypto/ed25519"
 	"github.com/lazyledger/lazyledger-core/p2p"
@@ -83,6 +86,8 @@ func Setup(testnet *e2e.Testnet) error {
 		if err != nil {
 			return err
 		}
+		// todo(evan): the path should be a constant
+		cfg.IPFS.ConfigRootPath = filepath.Join(nodeDir, ".ipfs")
 		config.WriteConfigFile(filepath.Join(nodeDir, "config", "config.toml"), cfg) // panics
 
 		appCfg, err := MakeAppConfig(node)
@@ -94,12 +99,12 @@ func Setup(testnet *e2e.Testnet) error {
 			return err
 		}
 
-		err = (&p2p.NodeKey{PrivKey: node.Key}).SaveAs(filepath.Join(nodeDir, "config", "node_key.json"))
+		err = (&p2p.NodeKey{PrivKey: node.NodeKey}).SaveAs(filepath.Join(nodeDir, "config", "node_key.json"))
 		if err != nil {
 			return err
 		}
 
-		(privval.NewFilePV(node.Key,
+		(privval.NewFilePV(node.PrivvalKey,
 			filepath.Join(nodeDir, PrivvalKeyFile),
 			filepath.Join(nodeDir, PrivvalStateFile),
 		)).Save()
@@ -110,6 +115,10 @@ func Setup(testnet *e2e.Testnet) error {
 			filepath.Join(nodeDir, PrivvalDummyKeyFile),
 			filepath.Join(nodeDir, PrivvalDummyStateFile),
 		)).Save()
+		err = commands.InitIpfs(cfg)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -118,10 +127,32 @@ func Setup(testnet *e2e.Testnet) error {
 // MakeDockerCompose generates a Docker Compose config for a testnet.
 func MakeDockerCompose(testnet *e2e.Testnet) ([]byte, error) {
 	// Must use version 2 Docker Compose format, to support IPv6.
-	tmpl, err := template.New("docker-compose").Parse(`version: '2.4'
+	tmpl, err := template.New("docker-compose").Funcs(template.FuncMap{
+		"startCommands": func(misbehaviors map[int64]string, logLevel string) string {
+			command := "start"
+
+			// FIXME: Temporarily disable behaviors until maverick is redesigned
+			// misbehaviorString := ""
+			// for height, misbehavior := range misbehaviors {
+			// 	// after the first behavior set, a comma must be prepended
+			// 	if misbehaviorString != "" {
+			// 		misbehaviorString += ","
+			// 	}
+			// 	heightString := strconv.Itoa(int(height))
+			// 	misbehaviorString += misbehavior + "," + heightString
+			// }
+
+			// if misbehaviorString != "" {
+			// 	command += " --misbehaviors " + misbehaviorString
+			// }
+			return command
+		},
+	}).Parse(`version: '2.4'
 
 networks:
   {{ .Name }}:
+    labels:
+      e2e: true
     driver: bridge
 {{- if .IPv6 }}
     enable_ipv6: true
@@ -134,10 +165,15 @@ networks:
 services:
 {{- range .Nodes }}
   {{ .Name }}:
+    labels:
+      e2e: true
     container_name: {{ .Name }}
     image: tendermint/e2e-node
 {{- if eq .ABCIProtocol "builtin" }}
     entrypoint: /usr/bin/entrypoint-builtin
+{{- end }}
+{{- if ne .ABCIProtocol "builtin"}}
+    command: {{ startCommands .Misbehaviors .LogLevel }}
 {{- end }}
     init: true
     ports:
@@ -169,11 +205,18 @@ func MakeGenesis(testnet *e2e.Testnet) (types.GenesisDoc, error) {
 		ConsensusParams: types.DefaultConsensusParams(),
 		InitialHeight:   testnet.InitialHeight,
 	}
+	switch testnet.KeyType {
+	case "", types.ABCIPubKeyTypeEd25519, types.ABCIPubKeyTypeSecp256k1:
+		genesis.ConsensusParams.Validator.PubKeyTypes =
+			append(genesis.ConsensusParams.Validator.PubKeyTypes, types.ABCIPubKeyTypeSecp256k1)
+	default:
+		return genesis, errors.New("unsupported KeyType")
+	}
 	for validator, power := range testnet.Validators {
 		genesis.Validators = append(genesis.Validators, types.GenesisValidator{
 			Name:    validator.Name,
-			Address: validator.Key.PubKey().Address(),
-			PubKey:  validator.Key.PubKey(),
+			Address: validator.PrivvalKey.PubKey().Address(),
+			PubKey:  validator.PrivvalKey.PubKey(),
 			Power:   power,
 		})
 	}
@@ -200,17 +243,11 @@ func MakeConfig(node *e2e.Node) (*config.Config, error) {
 	cfg.RPC.ListenAddress = "tcp://0.0.0.0:26657"
 	cfg.P2P.ExternalAddress = fmt.Sprintf("tcp://%v", node.AddressP2P(false))
 	cfg.P2P.AddrBookStrict = false
-	cfg.DBBackend = node.Database
 	cfg.StateSync.DiscoveryTime = 5 * time.Second
 
 	switch node.ABCIProtocol {
-	case e2e.ProtocolUNIX:
-		cfg.ProxyApp = AppAddressUNIX
-	case e2e.ProtocolTCP:
-		cfg.ProxyApp = AppAddressTCP
-	case e2e.ProtocolGRPC:
-		cfg.ProxyApp = AppAddressTCP
-		cfg.ABCI = "grpc"
+	case e2e.ProtocolUNIX, e2e.ProtocolTCP, e2e.ProtocolGRPC:
+		return nil, fmt.Errorf("unexpected ABCI protocol setting %q", node.ABCIProtocol)
 	case e2e.ProtocolBuiltin:
 		cfg.ProxyApp = ""
 		cfg.ABCI = ""
@@ -282,6 +319,7 @@ func MakeConfig(node *e2e.Node) (*config.Config, error) {
 		}
 		cfg.P2P.PersistentPeers += peer.AddressP2P(true)
 	}
+
 	return cfg, nil
 }
 
@@ -291,19 +329,15 @@ func MakeAppConfig(node *e2e.Node) ([]byte, error) {
 		"chain_id":          node.Testnet.Name,
 		"dir":               "data/app",
 		"listen":            AppAddressUNIX,
-		"protocol":          "socket",
+		"protocol":          "builtin",
 		"persist_interval":  node.PersistInterval,
 		"snapshot_interval": node.SnapshotInterval,
 		"retain_blocks":     node.RetainBlocks,
+		"key_type":          node.PrivvalKey.Type(),
 	}
 	switch node.ABCIProtocol {
-	case e2e.ProtocolUNIX:
-		cfg["listen"] = AppAddressUNIX
-	case e2e.ProtocolTCP:
-		cfg["listen"] = AppAddressTCP
-	case e2e.ProtocolGRPC:
-		cfg["listen"] = AppAddressTCP
-		cfg["protocol"] = "grpc"
+	case e2e.ProtocolUNIX, e2e.ProtocolTCP, e2e.ProtocolGRPC:
+		return nil, fmt.Errorf("unexpected ABCI protocol setting %q", node.ABCIProtocol)
 	case e2e.ProtocolBuiltin:
 		delete(cfg, "listen")
 		cfg["protocol"] = "builtin"
@@ -325,13 +359,18 @@ func MakeAppConfig(node *e2e.Node) ([]byte, error) {
 			return nil, fmt.Errorf("unexpected privval protocol setting %q", node.PrivvalProtocol)
 		}
 	}
+	misbehaviors := make(map[string]string)
+	for height, misbehavior := range node.Misbehaviors {
+		misbehaviors[strconv.Itoa(int(height))] = misbehavior
+	}
+	cfg["misbehaviors"] = misbehaviors
 
 	if len(node.Testnet.ValidatorUpdates) > 0 {
 		validatorUpdates := map[string]map[string]int64{}
 		for height, validators := range node.Testnet.ValidatorUpdates {
 			updateVals := map[string]int64{}
 			for node, power := range validators {
-				updateVals[base64.StdEncoding.EncodeToString(node.Key.PubKey().Bytes())] = power
+				updateVals[base64.StdEncoding.EncodeToString(node.PrivvalKey.PubKey().Bytes())] = power
 			}
 			validatorUpdates[fmt.Sprintf("%v", height)] = updateVals
 		}
@@ -356,7 +395,7 @@ func UpdateConfigStateSync(node *e2e.Node, height int64, hash []byte) error {
 	if err != nil {
 		return err
 	}
-	bz = regexp.MustCompile(`(?m)^trust_height =.*`).ReplaceAll(bz, []byte(fmt.Sprintf(`trust_height = %v`, height)))
-	bz = regexp.MustCompile(`(?m)^trust_hash =.*`).ReplaceAll(bz, []byte(fmt.Sprintf(`trust_hash = "%X"`, hash)))
+	bz = regexp.MustCompile(`(?m)^trust-height =.*`).ReplaceAll(bz, []byte(fmt.Sprintf(`trust-height = %v`, height)))
+	bz = regexp.MustCompile(`(?m)^trust-hash =.*`).ReplaceAll(bz, []byte(fmt.Sprintf(`trust-hash = "%X"`, hash)))
 	return ioutil.WriteFile(cfgPath, bz, 0644)
 }

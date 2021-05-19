@@ -5,23 +5,20 @@ package trust
 
 import (
 	"fmt"
-	"io/ioutil"
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	dbm "github.com/tendermint/tm-db"
 
+	"github.com/lazyledger/lazyledger-core/libs/db/badgerdb"
+	"github.com/lazyledger/lazyledger-core/libs/db/memdb"
 	"github.com/lazyledger/lazyledger-core/libs/log"
 )
 
 func TestTrustMetricStoreSaveLoad(t *testing.T) {
-	dir, err := ioutil.TempDir("", "trust_test")
-	require.NoError(t, err)
-	defer os.Remove(dir)
+	dir := t.TempDir()
 
-	historyDB, err := dbm.NewDB("trusthistory", "goleveldb", dir)
+	historyDB, err := badgerdb.NewDB("trusthistory", dir)
 	require.NoError(t, err)
 
 	// 0 peers saved
@@ -84,8 +81,7 @@ func TestTrustMetricStoreSaveLoad(t *testing.T) {
 }
 
 func TestTrustMetricStoreConfig(t *testing.T) {
-	historyDB, err := dbm.NewDB("", "memdb", "")
-	require.NoError(t, err)
+	historyDB := memdb.NewDB()
 
 	config := MetricConfig{
 		ProportionalWeight: 0.5,
@@ -95,7 +91,7 @@ func TestTrustMetricStoreConfig(t *testing.T) {
 	// Create a store with custom config
 	store := NewTrustMetricStore(historyDB, config)
 	store.SetLogger(log.TestingLogger())
-	err = store.Start()
+	err := store.Start()
 	require.NoError(t, err)
 
 	// Have the store make us a metric with the config
@@ -109,12 +105,11 @@ func TestTrustMetricStoreConfig(t *testing.T) {
 }
 
 func TestTrustMetricStoreLookup(t *testing.T) {
-	historyDB, err := dbm.NewDB("", "memdb", "")
-	require.NoError(t, err)
+	historyDB := memdb.NewDB()
 
 	store := NewTrustMetricStore(historyDB, DefaultConfig())
 	store.SetLogger(log.TestingLogger())
-	err = store.Start()
+	err := store.Start()
 	require.NoError(t, err)
 
 	// Create 100 peers in the trust metric store
@@ -132,12 +127,11 @@ func TestTrustMetricStoreLookup(t *testing.T) {
 }
 
 func TestTrustMetricStorePeerScore(t *testing.T) {
-	historyDB, err := dbm.NewDB("", "memdb", "")
-	require.NoError(t, err)
+	historyDB := memdb.NewDB()
 
 	store := NewTrustMetricStore(historyDB, DefaultConfig())
 	store.SetLogger(log.TestingLogger())
-	err = store.Start()
+	err := store.Start()
 	require.NoError(t, err)
 
 	key := "TestKey"

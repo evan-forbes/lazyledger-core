@@ -50,7 +50,11 @@ func MsgToProto(msg Message) (*tmcons.Message, error) {
 			},
 		}
 	case *ProposalMessage:
-		pbP := msg.Proposal.ToProto()
+		pbP, err := msg.Proposal.ToProto()
+		if err != nil {
+			return nil, err
+		}
+
 		pb = tmcons.Message{
 			Sum: &tmcons.Message_Proposal{
 				Proposal: &tmcons.Proposal{
@@ -167,11 +171,14 @@ func MsgFromProto(msg *tmcons.Message) (Message, error) {
 	case *tmcons.Message_NewValidBlock:
 		pbPartSetHeader, err := types.PartSetHeaderFromProto(&msg.NewValidBlock.BlockPartSetHeader)
 		if err != nil {
-			return nil, fmt.Errorf("parts to proto error: %w", err)
+			return nil, fmt.Errorf("parts header to proto error: %w", err)
 		}
 
 		pbBits := new(bits.BitArray)
-		pbBits.FromProto(msg.NewValidBlock.BlockParts)
+		err = pbBits.FromProto(msg.NewValidBlock.BlockParts)
+		if err != nil {
+			return nil, fmt.Errorf("parts to proto error: %w", err)
+		}
 
 		pb = &NewValidBlockMessage{
 			Height:             msg.NewValidBlock.Height,
@@ -191,7 +198,10 @@ func MsgFromProto(msg *tmcons.Message) (Message, error) {
 		}
 	case *tmcons.Message_ProposalPol:
 		pbBits := new(bits.BitArray)
-		pbBits.FromProto(&msg.ProposalPol.ProposalPol)
+		err := pbBits.FromProto(&msg.ProposalPol.ProposalPol)
+		if err != nil {
+			return nil, fmt.Errorf("proposal PoL to proto error: %w", err)
+		}
 		pb = &ProposalPOLMessage{
 			Height:           msg.ProposalPol.Height,
 			ProposalPOLRound: msg.ProposalPol.ProposalPolRound,
@@ -237,10 +247,13 @@ func MsgFromProto(msg *tmcons.Message) (Message, error) {
 	case *tmcons.Message_VoteSetBits:
 		bi, err := types.BlockIDFromProto(&msg.VoteSetBits.BlockID)
 		if err != nil {
-			return nil, fmt.Errorf("voteSetBits msg to proto error: %w", err)
+			return nil, fmt.Errorf("block ID to proto error: %w", err)
 		}
 		bits := new(bits.BitArray)
-		bits.FromProto(&msg.VoteSetBits.Votes)
+		err = bits.FromProto(&msg.VoteSetBits.Votes)
+		if err != nil {
+			return nil, fmt.Errorf("votes to proto error: %w", err)
+		}
 
 		pb = &VoteSetBitsMessage{
 			Height:  msg.VoteSetBits.Height,

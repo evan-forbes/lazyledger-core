@@ -236,10 +236,12 @@ func (r *Reactor) logErrAddrBook(err error) {
 }
 
 // Receive implements Reactor by handling incoming PEX messages.
+// XXX: do not call any methods that can block or incur heavy processing.
+// https://github.com/tendermint/tendermint/issues/2888
 func (r *Reactor) Receive(chID byte, src Peer, msgBytes []byte) {
 	msg, err := decodeMsg(msgBytes)
 	if err != nil {
-		r.Logger.Error("Error decoding message", "src", src, "chId", chID, "msg", msg, "err", err, "bytes", msgBytes)
+		r.Logger.Error("Error decoding message", "src", src, "chId", chID, "err", err)
 		r.Switch.StopPeerForError(src, err)
 		return
 	}
@@ -521,7 +523,8 @@ func (r *Reactor) ensurePeers() {
 		peers := r.Switch.Peers().List()
 		peersCount := len(peers)
 		if peersCount > 0 {
-			peer := peers[tmrand.Int()%peersCount]
+			rand := tmrand.NewRand()
+			peer := peers[rand.Int()%peersCount]
 			r.Logger.Info("We need more addresses. Sending pexRequest to random peer", "peer", peer)
 			r.RequestAddrs(peer)
 		}
@@ -554,7 +557,8 @@ func (r *Reactor) dialPeer(addr *p2p.NetAddress) error {
 
 	// exponential backoff if it's not our first attempt to dial given address
 	if attempts > 0 {
-		jitter := time.Duration(tmrand.Float64() * float64(time.Second)) // 1s == (1e9 ns)
+		rand := tmrand.NewRand()
+		jitter := time.Duration(rand.Float64() * float64(time.Second)) // 1s == (1e9 ns)
 		backoffDuration := jitter + ((1 << uint(attempts)) * time.Second)
 		backoffDuration = r.maxBackoffDurationForPeer(addr, backoffDuration)
 		sinceLastDialed := time.Since(lastDialed)
@@ -620,7 +624,8 @@ func (r *Reactor) checkSeeds() (numOnline int, netAddrs []*p2p.NetAddress, err e
 
 // randomly dial seeds until we connect to one or exhaust them
 func (r *Reactor) dialSeeds() {
-	perm := tmrand.Perm(len(r.seedAddrs))
+	rand := tmrand.NewRand()
+	perm := rand.Perm(len(r.seedAddrs))
 	// perm := r.Switch.rng.Perm(lSeeds)
 	for _, i := range perm {
 		// dial a random seed

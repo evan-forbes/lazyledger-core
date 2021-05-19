@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -11,7 +12,7 @@ import (
 	"time"
 
 	"github.com/gogo/protobuf/proto"
-
+	ipfsapi "github.com/ipfs/interface-go-ipfs-core"
 	cfg "github.com/lazyledger/lazyledger-core/config"
 	cstypes "github.com/lazyledger/lazyledger-core/consensus/types"
 	"github.com/lazyledger/lazyledger-core/crypto"
@@ -73,9 +74,9 @@ type txNotifier interface {
 
 // interface to the evidence pool
 type evidencePool interface {
-	// Adds consensus based evidence to the evidence pool where time is the time
-	// of the block where the offense occurred and the validator set is the current one.
-	AddEvidenceFromConsensus(types.Evidence, time.Time, *types.ValidatorSet) error
+	// Adds consensus based evidence to the evidence pool. This function differs to
+	// AddEvidence by bypassing verification and adding it immediately to the pool
+	AddEvidenceFromConsensus(types.Evidence) error
 }
 
 // State handles execution of the consensus algorithm.
@@ -91,6 +92,8 @@ type State struct {
 
 	// store blocks and commits
 	blockStore sm.BlockStore
+
+	IpfsAPI ipfsapi.CoreAPI
 
 	// create and execute blocks
 	blockExec *sm.BlockExecutor
@@ -328,7 +331,7 @@ func (cs *State) OnStart() error {
 				return err
 			}
 
-			cs.Logger.Info("WAL file is corrupted. Attempting repair", "err", err)
+			cs.Logger.Error("WAL file is corrupted, attempting repair", "err", err)
 
 			// 1) prep work
 			if err := cs.wal.Stop(); err != nil {
@@ -345,7 +348,7 @@ func (cs *State) OnStart() error {
 
 			// 3) try to repair (WAL file will be overwritten!)
 			if err := repairWalFile(corruptedFile, cs.config.WalFile()); err != nil {
-				cs.Logger.Error("Repair failed", "err", err)
+				cs.Logger.Error("WAL repair failed", "err", err)
 				return err
 			}
 			cs.Logger.Info("Successful repair")
@@ -810,7 +813,7 @@ func (cs *State) handleMsg(mi msgInfo) {
 		// We probably don't want to stop the peer here. The vote does not
 		// necessarily comes from a malicious peer but can be just broadcasted by
 		// a typical peer.
-		// https://github.com/lazyledger/lazyledger-core/issues/1281
+		// https://github.com/tendermint/tendermint/issues/1281
 		// }
 
 		// NOTE: the vote is broadcast to peers by the reactor listening
@@ -1084,8 +1087,13 @@ func (cs *State) defaultDecideProposal(height int64, round int32) {
 
 	// Make proposal
 	propBlockID := types.BlockID{Hash: block.Hash(), PartSetHeader: blockParts.Header()}
-	proposal := types.NewProposal(height, round, cs.ValidRound, propBlockID)
-	p := proposal.ToProto()
+	proposal := types.NewProposal(height, round, cs.ValidRound, propBlockID, &block.DataAvailabilityHeader)
+	p, err := proposal.ToProto()
+	if err != nil {
+		cs.Logger.Error(fmt.Sprintf("can't serialize proposal: %s", err.Error()))
+		return
+	}
+
 	if err := cs.privValidator.SignProposal(cs.state.ChainID, p); err == nil {
 		proposal.Signature = p.Signature
 
@@ -1099,6 +1107,19 @@ func (cs *State) defaultDecideProposal(height int64, round int32) {
 		cs.Logger.Debug(fmt.Sprintf("Signed proposal block: %v", block))
 	} else if !cs.replayMode {
 		cs.Logger.Error("enterPropose: Error signing proposal", "height", height, "round", round, "err", err)
+	}
+
+	// post data to ipfs
+	// TODO(evan): don't hard code context and timeout
+	if cs.IpfsAPI != nil {
+		// longer timeouts result in block proposers failing to propose blocks in time.
+		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*1500)
+		defer cancel()
+		// TODO: post data to IPFS in a goroutine
+		err := block.PutBlock(ctx, cs.IpfsAPI.Dag())
+		if err != nil {
+			cs.Logger.Error(fmt.Sprintf("failure to post block data to IPFS: %s", err.Error()))
+		}
 	}
 }
 
@@ -1734,7 +1755,11 @@ func (cs *State) defaultSetProposal(proposal *types.Proposal) error {
 		return ErrInvalidProposalPOLRound
 	}
 
-	p := proposal.ToProto()
+	p, err := proposal.ToProto()
+	if err != nil {
+		return err
+	}
+
 	// Verify signature
 	if !cs.Validators.GetProposer().PubKey.VerifySignature(
 		types.ProposalSignBytes(cs.state.ChainID, p), proposal.Signature,
@@ -1871,10 +1896,14 @@ func (cs *State) tryAddVote(vote *types.Vote, peerID p2p.ID) (bool, error) {
 			} else {
 				timestamp = sm.MedianTime(cs.LastCommit.MakeCommit(), cs.LastValidators)
 			}
-			evidenceErr := cs.evpool.AddEvidenceFromConsensus(
-				types.NewDuplicateVoteEvidence(voteErr.VoteA, voteErr.VoteB), timestamp, cs.Validators)
+			// form duplicate vote evidence from the conflicting votes and send it across to the
+			// evidence pool
+			ev := types.NewDuplicateVoteEvidence(voteErr.VoteA, voteErr.VoteB, timestamp, cs.Validators)
+			evidenceErr := cs.evpool.AddEvidenceFromConsensus(ev)
 			if evidenceErr != nil {
 				cs.Logger.Error("Failed to add evidence to the evidence pool", "err", evidenceErr)
+			} else {
+				cs.Logger.Debug("Added evidence to the evidence pool", "ev", ev)
 			}
 			return added, err
 		} else if err == types.ErrVoteNonDeterministicSignature {
@@ -2212,7 +2241,7 @@ func repairWalFile(src, dst string) error {
 	}
 	defer in.Close()
 
-	out, err := os.Open(dst)
+	out, err := os.Create(dst)
 	if err != nil {
 		return err
 	}

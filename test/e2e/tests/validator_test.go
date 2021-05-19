@@ -4,15 +4,20 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	e2e "github.com/lazyledger/lazyledger-core/test/e2e/pkg"
 	"github.com/lazyledger/lazyledger-core/types"
-	"github.com/stretchr/testify/require"
 )
 
 // Tests that validator sets are available and correct according to
 // scheduled validator updates.
 func TestValidator_Sets(t *testing.T) {
 	testNode(t, func(t *testing.T, node e2e.Node) {
+		if node.Mode == e2e.ModeSeed {
+			return
+		}
+
 		client, err := node.Client()
 		require.NoError(t, err)
 		status, err := client.Status(ctx)
@@ -55,7 +60,7 @@ func TestValidator_Propose(t *testing.T) {
 		if node.Mode != e2e.ModeValidator {
 			return
 		}
-		address := node.Key.PubKey().Address()
+		address := node.PrivvalKey.PubKey().Address()
 		valSchedule := newValidatorSchedule(*node.Testnet)
 
 		expectCount := 0
@@ -72,8 +77,9 @@ func TestValidator_Propose(t *testing.T) {
 
 		require.False(t, proposeCount == 0 && expectCount > 0,
 			"node did not propose any blocks (expected %v)", expectCount)
-		require.Less(t, expectCount-proposeCount, 5,
-			"validator missed proposing too many blocks (proposed %v out of %v)", proposeCount, expectCount)
+		if expectCount > 5 {
+			require.GreaterOrEqual(t, proposeCount, 3, "validator didn't propose even 3 blocks")
+		}
 	})
 }
 
@@ -85,7 +91,7 @@ func TestValidator_Sign(t *testing.T) {
 		if node.Mode != e2e.ModeValidator {
 			return
 		}
-		address := node.Key.PubKey().Address()
+		address := node.PrivvalKey.PubKey().Address()
 		valSchedule := newValidatorSchedule(*node.Testnet)
 
 		expectCount := 0
@@ -110,9 +116,10 @@ func TestValidator_Sign(t *testing.T) {
 		}
 
 		require.False(t, signCount == 0 && expectCount > 0,
-			"node did not sign any blocks (expected %v)", expectCount)
-		require.Less(t, float64(expectCount-signCount)/float64(expectCount), 0.5,
-			"validator missed signing too many blocks (signed %v out of %v)", signCount, expectCount)
+			"validator did not sign any blocks (expected %v)", expectCount)
+		if expectCount > 7 {
+			require.GreaterOrEqual(t, signCount, 3, "validator didn't sign even 3 blocks (expected %v)", expectCount)
+		}
 	})
 }
 
@@ -155,7 +162,7 @@ func (s *validatorSchedule) Increment(heights int64) {
 func makeVals(valMap map[*e2e.Node]int64) []*types.Validator {
 	vals := make([]*types.Validator, 0, len(valMap))
 	for node, power := range valMap {
-		vals = append(vals, types.NewValidator(node.Key.PubKey(), power))
+		vals = append(vals, types.NewValidator(node.PrivvalKey.PubKey(), power))
 	}
 	return vals
 }

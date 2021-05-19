@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"time"
 
-	dbm "github.com/tendermint/tm-db"
-
 	abci "github.com/lazyledger/lazyledger-core/abci/types"
 	"github.com/lazyledger/lazyledger-core/crypto"
 	"github.com/lazyledger/lazyledger-core/crypto/ed25519"
+	dbm "github.com/lazyledger/lazyledger-core/libs/db"
+	"github.com/lazyledger/lazyledger-core/libs/db/memdb"
 	tmrand "github.com/lazyledger/lazyledger-core/libs/rand"
 	tmstate "github.com/lazyledger/lazyledger-core/proto/tendermint/state"
 	tmproto "github.com/lazyledger/lazyledger-core/proto/tendermint/types"
@@ -59,7 +59,7 @@ func makeAndApplyGoodBlock(state sm.State, height int64, lastCommit *types.Commi
 		makeTxs(height),
 		evidence,
 		nil,
-		nil,
+		types.Messages{},
 		lastCommit,
 		proposerAddr,
 	)
@@ -122,7 +122,7 @@ func makeState(nVals, height int) (sm.State, dbm.DB, map[string]types.PrivValida
 		AppHash:    nil,
 	})
 
-	stateDB := dbm.NewMemDB()
+	stateDB := memdb.NewDB()
 	stateStore := sm.NewStore(stateDB)
 	if err := stateStore.Save(s); err != nil {
 		panic(err)
@@ -145,7 +145,7 @@ func makeBlock(state sm.State, height int64) *types.Block {
 		makeTxs(state.LastBlockHeight),
 		nil,
 		nil,
-		nil,
+		types.Messages{},
 		new(types.Commit),
 		state.Validators.GetProposer().Address,
 	)

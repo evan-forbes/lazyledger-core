@@ -8,22 +8,28 @@ import (
 	"net"
 	"net/http"
 	_ "net/http/pprof" // nolint: gosec // securely exposed on separate, optional port
+	"path/filepath"
 	"strings"
 	"time"
 
+	ipfscore "github.com/ipfs/go-ipfs/core"
+	coreapi "github.com/ipfs/go-ipfs/core/coreapi"
+	"github.com/ipfs/go-ipfs/core/node/libp2p"
+	"github.com/ipfs/go-ipfs/plugin/loader"
+	"github.com/ipfs/go-ipfs/repo/fsrepo"
+	"github.com/lazyledger/lazyledger-core/p2p/ipld/plugin/nodes"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/cors"
 
-	dbm "github.com/tendermint/tm-db"
-
 	abci "github.com/lazyledger/lazyledger-core/abci/types"
 	bcv0 "github.com/lazyledger/lazyledger-core/blockchain/v0"
-	bcv2 "github.com/lazyledger/lazyledger-core/blockchain/v2"
 	cfg "github.com/lazyledger/lazyledger-core/config"
 	cs "github.com/lazyledger/lazyledger-core/consensus"
 	"github.com/lazyledger/lazyledger-core/crypto"
 	"github.com/lazyledger/lazyledger-core/evidence"
+	dbm "github.com/lazyledger/lazyledger-core/libs/db"
+	"github.com/lazyledger/lazyledger-core/libs/db/badgerdb"
 	tmjson "github.com/lazyledger/lazyledger-core/libs/json"
 	"github.com/lazyledger/lazyledger-core/libs/log"
 	tmpubsub "github.com/lazyledger/lazyledger-core/libs/pubsub"
@@ -62,8 +68,7 @@ type DBProvider func(*DBContext) (dbm.DB, error)
 // DefaultDBProvider returns a database using the DBBackend and DBDir
 // specified in the ctx.Config.
 func DefaultDBProvider(ctx *DBContext) (dbm.DB, error) {
-	dbType := dbm.BackendType(ctx.Config.DBBackend)
-	return dbm.NewDB(ctx.ID, dbType, ctx.Config.DBDir())
+	return badgerdb.NewDB(ctx.ID, ctx.Config.DBDir())
 }
 
 // GenesisDocProvider returns a GenesisDoc.
@@ -91,14 +96,20 @@ func DefaultNewNode(config *cfg.Config, logger log.Logger) (*Node, error) {
 		return nil, fmt.Errorf("failed to load or gen node key %s: %w", config.NodeKeyFile(), err)
 	}
 
+	pval, err := privval.LoadOrGenFilePV(config.PrivValidatorKeyFile(), config.PrivValidatorStateFile())
+	if err != nil {
+		return nil, err
+	}
+
 	return NewNode(config,
-		privval.LoadOrGenFilePV(config.PrivValidatorKeyFile(), config.PrivValidatorStateFile()),
+		pval,
 		nodeKey,
 		proxy.DefaultClientCreator(config.ProxyApp, config.ABCI, config.DBDir()),
 		DefaultGenesisDocProviderFunc(config),
 		DefaultDBProvider,
 		DefaultMetricsProvider(config.Instrumentation),
 		logger,
+		EmbedIpfsNode(true),
 	)
 }
 
@@ -122,7 +133,7 @@ func DefaultMetricsProvider(config *cfg.InstrumentationConfig) MetricsProvider {
 // Option sets a parameter for the node.
 type Option func(*Node)
 
-// Temporary interface for switching to fast sync, we should get rid of v0 and v1 reactors.
+// Temporary interface for switching to fast sync, we should get rid of v0.
 // See: https://github.com/tendermint/tendermint/issues/4595
 type fastSyncReactor interface {
 	SwitchToFastSync(sm.State) error
@@ -162,6 +173,22 @@ func StateProvider(stateProvider statesync.StateProvider) Option {
 	}
 }
 
+// IpfsPluginsWereLoaded indicates that all IPFS plugin were already loaded.
+// Setting up plugins will be skipped when creating the IPFS node.
+func IpfsPluginsWereLoaded(wereAlreadyLoaded bool) Option {
+	return func(n *Node) {
+		n.areIpfsPluginsAlreadyLoaded = wereAlreadyLoaded
+	}
+}
+
+// IpfsPluginsWereLoaded indicates that all IPFS plugin were already loaded.
+// Setting up plugins will skipped when creating the IPFS node.
+func EmbedIpfsNode(embed bool) Option {
+	return func(n *Node) {
+		n.embedIpfsNode = embed
+	}
+}
+
 //------------------------------------------------------------------------------
 
 // Node is the highest level interface to a full Tendermint node.
@@ -179,7 +206,7 @@ type Node struct {
 	sw          *p2p.Switch  // p2p connections
 	addrBook    pex.AddrBook // known peers
 	nodeInfo    p2p.NodeInfo
-	nodeKey     *p2p.NodeKey // our node privkey
+	nodeKey     p2p.NodeKey // our node privkey
 	isListening bool
 
 	// services
@@ -202,6 +229,10 @@ type Node struct {
 	txIndexer         txindex.TxIndexer
 	indexerService    *txindex.IndexerService
 	prometheusSrv     *http.Server
+	// we store a ref to the full IpfsNode (instead of ipfs' CoreAPI) so we can Close() it OnStop()
+	embedIpfsNode               bool               // whether the node should start an IPFS node on startup
+	ipfsNode                    *ipfscore.IpfsNode // ipfs node
+	areIpfsPluginsAlreadyLoaded bool               // avoid injecting plugins twice in tests etc
 }
 
 func initDBs(config *cfg.Config, dbProvider DBProvider) (blockStore *store.BlockStore, stateDB dbm.DB, err error) {
@@ -360,8 +391,8 @@ func createBlockchainReactor(config *cfg.Config,
 	switch config.FastSync.Version {
 	case "v0":
 		bcReactor = bcv0.NewBlockchainReactor(state.Copy(), blockExec, blockStore, fastSync)
-	case "v2":
-		bcReactor = bcv2.NewBlockchainReactor(state.Copy(), blockExec, blockStore, fastSync)
+	// case "v2":
+	//	bcReactor = bcv2.NewBlockchainReactor(state.Copy(), blockExec, blockStore, fastSync)
 	default:
 		return nil, fmt.Errorf("unknown fastsync version %s", config.FastSync.Version)
 	}
@@ -406,7 +437,7 @@ func createConsensusReactor(config *cfg.Config,
 func createTransport(
 	config *cfg.Config,
 	nodeInfo p2p.NodeInfo,
-	nodeKey *p2p.NodeKey,
+	nodeKey p2p.NodeKey,
 	proxyApp proxy.AppConns,
 ) (
 	*p2p.MultiplexTransport,
@@ -414,7 +445,7 @@ func createTransport(
 ) {
 	var (
 		mConnConfig = p2p.MConnConfig(config.P2P)
-		transport   = p2p.NewMultiplexTransport(nodeInfo, *nodeKey, mConnConfig)
+		transport   = p2p.NewMultiplexTransport(nodeInfo, nodeKey, mConnConfig)
 		connFilters = []p2p.ConnFilterFunc{}
 		peerFilters = []p2p.PeerFilterFunc{}
 	)
@@ -430,7 +461,7 @@ func createTransport(
 			connFilters,
 			// ABCI query for address filtering.
 			func(_ p2p.ConnSet, c net.Conn, _ []net.IP) error {
-				res, err := proxyApp.Query().QuerySync(abci.RequestQuery{
+				res, err := proxyApp.Query().QuerySync(context.Background(), abci.RequestQuery{
 					Path: fmt.Sprintf("/p2p/filter/addr/%s", c.RemoteAddr().String()),
 				})
 				if err != nil {
@@ -448,7 +479,7 @@ func createTransport(
 			peerFilters,
 			// ABCI query for ID filtering.
 			func(_ p2p.IPeerSet, p p2p.Peer) error {
-				res, err := proxyApp.Query().QuerySync(abci.RequestQuery{
+				res, err := proxyApp.Query().QuerySync(context.Background(), abci.RequestQuery{
 					Path: fmt.Sprintf("/p2p/filter/id/%s", p.ID()),
 				})
 				if err != nil {
@@ -478,11 +509,11 @@ func createSwitch(config *cfg.Config,
 	peerFilters []p2p.PeerFilterFunc,
 	mempoolReactor *mempl.Reactor,
 	bcReactor p2p.Reactor,
-	stateSyncReactor *statesync.Reactor,
+	stateSyncReactor *p2p.ReactorShim,
 	consensusReactor *cs.Reactor,
 	evidenceReactor *evidence.Reactor,
 	nodeInfo p2p.NodeInfo,
-	nodeKey *p2p.NodeKey,
+	nodeKey p2p.NodeKey,
 	p2pLogger log.Logger) *p2p.Switch {
 
 	sw := p2p.NewSwitch(
@@ -501,26 +532,26 @@ func createSwitch(config *cfg.Config,
 	sw.SetNodeInfo(nodeInfo)
 	sw.SetNodeKey(nodeKey)
 
-	p2pLogger.Info("P2P Node ID", "ID", nodeKey.ID(), "file", config.NodeKeyFile())
+	p2pLogger.Info("P2P Node ID", "ID", nodeKey.ID, "file", config.NodeKeyFile())
 	return sw
 }
 
 func createAddrBookAndSetOnSwitch(config *cfg.Config, sw *p2p.Switch,
-	p2pLogger log.Logger, nodeKey *p2p.NodeKey) (pex.AddrBook, error) {
+	p2pLogger log.Logger, nodeKey p2p.NodeKey) (pex.AddrBook, error) {
 
 	addrBook := pex.NewAddrBook(config.P2P.AddrBookFile(), config.P2P.AddrBookStrict)
 	addrBook.SetLogger(p2pLogger.With("book", config.P2P.AddrBookFile()))
 
 	// Add ourselves to addrbook to prevent dialing ourselves
 	if config.P2P.ExternalAddress != "" {
-		addr, err := p2p.NewNetAddressString(p2p.IDAddressString(nodeKey.ID(), config.P2P.ExternalAddress))
+		addr, err := p2p.NewNetAddressString(p2p.IDAddressString(nodeKey.ID, config.P2P.ExternalAddress))
 		if err != nil {
 			return nil, fmt.Errorf("p2p.external_address is incorrect: %w", err)
 		}
 		addrBook.AddOurAddress(addr)
 	}
 	if config.P2P.ListenAddress != "" {
-		addr, err := p2p.NewNetAddressString(p2p.IDAddressString(nodeKey.ID(), config.P2P.ListenAddress))
+		addr, err := p2p.NewNetAddressString(p2p.IDAddressString(nodeKey.ID, config.P2P.ListenAddress))
 		if err != nil {
 			return nil, fmt.Errorf("p2p.laddr is incorrect: %w", err)
 		}
@@ -612,7 +643,7 @@ func startStateSync(ssR *statesync.Reactor, bcR fastSyncReactor, conR *cs.Reacto
 // NewNode returns a new, ready to go, Tendermint Node.
 func NewNode(config *cfg.Config,
 	privValidator types.PrivValidator,
-	nodeKey *p2p.NodeKey,
+	nodeKey p2p.NodeKey,
 	clientCreator proxy.ClientCreator,
 	genesisDocProvider GenesisDocProvider,
 	dbProvider DBProvider,
@@ -741,9 +772,18 @@ func NewNode(config *cfg.Config,
 	// FIXME The way we do phased startups (e.g. replay -> fast sync -> consensus) is very messy,
 	// we should clean this whole thing up. See:
 	// https://github.com/tendermint/tendermint/issues/4644
-	stateSyncReactor := statesync.NewReactor(proxyApp.Snapshot(), proxyApp.Query(),
-		config.StateSync.TempDir)
-	stateSyncReactor.SetLogger(logger.With("module", "statesync"))
+	stateSyncReactorShim := p2p.NewReactorShim("StateSyncShim", statesync.ChannelShims)
+	stateSyncReactorShim.SetLogger(logger.With("module", "statesync"))
+
+	stateSyncReactor := statesync.NewReactor(
+		stateSyncReactorShim.Logger,
+		proxyApp.Snapshot(),
+		proxyApp.Query(),
+		stateSyncReactorShim.GetChannel(statesync.SnapshotChannel),
+		stateSyncReactorShim.GetChannel(statesync.ChunkChannel),
+		stateSyncReactorShim.PeerUpdates,
+		config.StateSync.TempDir,
+	)
 
 	nodeInfo, err := makeNodeInfo(config, nodeKey, txIndexer, genDoc, state)
 	if err != nil {
@@ -757,7 +797,7 @@ func NewNode(config *cfg.Config,
 	p2pLogger := logger.With("module", "p2p")
 	sw := createSwitch(
 		config, transport, p2pMetrics, peerFilters, mempoolReactor, bcReactor,
-		stateSyncReactor, consensusReactor, evidenceReactor, nodeInfo, nodeKey, p2pLogger,
+		stateSyncReactorShim, consensusReactor, evidenceReactor, nodeInfo, nodeKey, p2pLogger,
 	)
 
 	err = sw.AddPersistentPeers(splitAndTrimEmpty(config.P2P.PersistentPeers, ",", " "))
@@ -864,7 +904,7 @@ func (n *Node) OnStart() error {
 	}
 
 	// Start the transport.
-	addr, err := p2p.NewNetAddressString(p2p.IDAddressString(n.nodeKey.ID(), n.config.P2P.ListenAddress))
+	addr, err := p2p.NewNetAddressString(p2p.IDAddressString(n.nodeKey.ID, n.config.P2P.ListenAddress))
 	if err != nil {
 		return err
 	}
@@ -887,6 +927,11 @@ func (n *Node) OnStart() error {
 		return err
 	}
 
+	// Start the real state sync reactor separately since the switch uses the shim.
+	if err := n.stateSyncReactor.Start(); err != nil {
+		return err
+	}
+
 	// Always connect to persistent peers
 	err = n.sw.DialPeersAsync(splitAndTrimEmpty(n.config.P2P.PersistentPeers, ",", " "))
 	if err != nil {
@@ -904,6 +949,23 @@ func (n *Node) OnStart() error {
 		if err != nil {
 			return fmt.Errorf("failed to start state sync: %w", err)
 		}
+	}
+	if n.embedIpfsNode {
+		// It is essential that we create a fresh instance of ipfs node on
+		// each start as internally the node gets only stopped once per instance.
+		// At least in ipfs 0.7.0; see:
+		// https://github.com/lazyledger/go-ipfs/blob/dd295e45608560d2ada7d7c8a30f1eef3f4019bb/core/builder.go#L48-L57
+		n.ipfsNode, err = createIpfsNode(n.config, n.areIpfsPluginsAlreadyLoaded, n.Logger)
+		if err != nil {
+			return fmt.Errorf("failed to create IPFS node: %w", err)
+		}
+
+		ipfsAPI, err := coreapi.NewCoreAPI(n.ipfsNode)
+		if err != nil {
+			return fmt.Errorf("failed to create an instance of the IPFS core API: %w", err)
+		}
+
+		n.consensusState.IpfsAPI = ipfsAPI
 	}
 
 	return nil
@@ -926,6 +988,11 @@ func (n *Node) OnStop() {
 	// now stop the reactors
 	if err := n.sw.Stop(); err != nil {
 		n.Logger.Error("Error closing switch", "err", err)
+	}
+
+	// Stop the real state sync reactor separately since the switch uses the shim.
+	if err := n.stateSyncReactor.Stop(); err != nil {
+		n.Logger.Error("failed to stop state sync service", "err", err)
 	}
 
 	// stop mempool WAL
@@ -957,6 +1024,16 @@ func (n *Node) OnStop() {
 		if err := n.prometheusSrv.Shutdown(context.Background()); err != nil {
 			// Error from closing listeners, or context timeout:
 			n.Logger.Error("Prometheus HTTP server Shutdown", "err", err)
+		}
+	}
+
+	if n.ipfsNode != nil {
+		// Internally, the node gets shut down by cancelling the
+		// context that was passed into the node.
+		// Calling Close() seems cleaner and we don't
+		// need to keep a reference to the context around.
+		if err := n.ipfsNode.Close(); err != nil {
+			n.Logger.Error("ipfsNode.Close()", err)
 		}
 	}
 }
@@ -1216,7 +1293,7 @@ func (n *Node) NodeInfo() p2p.NodeInfo {
 
 func makeNodeInfo(
 	config *cfg.Config,
-	nodeKey *p2p.NodeKey,
+	nodeKey p2p.NodeKey,
 	txIndexer txindex.TxIndexer,
 	genDoc *types.GenesisDoc,
 	state sm.State,
@@ -1230,8 +1307,8 @@ func makeNodeInfo(
 	switch config.FastSync.Version {
 	case "v0":
 		bcChannel = bcv0.BlockchainChannel
-	case "v2":
-		bcChannel = bcv2.BlockchainChannel
+	// case "v2":
+	//	bcChannel = bcv2.BlockchainChannel
 	default:
 		return nil, fmt.Errorf("unknown fastsync version %s", config.FastSync.Version)
 	}
@@ -1242,7 +1319,7 @@ func makeNodeInfo(
 			state.Version.Consensus.Block,
 			state.Version.Consensus.App,
 		),
-		DefaultNodeID: nodeKey.ID(),
+		DefaultNodeID: nodeKey.ID,
 		Network:       genDoc.ChainID,
 		Version:       version.TMCoreSemVer,
 		Channels: []byte{
@@ -1250,7 +1327,7 @@ func makeNodeInfo(
 			cs.StateChannel, cs.DataChannel, cs.VoteChannel, cs.VoteSetBitsChannel,
 			mempl.MempoolChannel,
 			evidence.EvidenceChannel,
-			statesync.SnapshotChannel, statesync.ChunkChannel,
+			byte(statesync.SnapshotChannel), byte(statesync.ChunkChannel),
 		},
 		Moniker: config.Moniker,
 		Other: p2p.DefaultNodeInfoOther{
@@ -1367,6 +1444,66 @@ func createAndStartPrivValidatorSocketClient(
 	pvscWithRetries := privval.NewRetrySignerClient(pvsc, retries, timeout)
 
 	return pvscWithRetries, nil
+}
+
+func createIpfsNode(config *cfg.Config, arePluginsAlreadyLoaded bool, logger log.Logger) (*ipfscore.IpfsNode, error) {
+	repoRoot := config.IPFSRepoRoot()
+	logger.Info("creating node in repo", "ipfs-root", repoRoot)
+	if !fsrepo.IsInitialized(repoRoot) {
+		// TODO: sentinel err
+		return nil, fmt.Errorf("ipfs repo root: %v not intitialized", repoRoot)
+	}
+	if !arePluginsAlreadyLoaded {
+		if err := setupPlugins(repoRoot, logger); err != nil {
+			return nil, err
+		}
+	}
+	// Open the repo
+	repo, err := fsrepo.Open(repoRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	// Construct the node
+	nodeOptions := &ipfscore.BuildCfg{
+		Online: true,
+		// This option sets the node to be a full DHT node (both fetching and storing DHT Records)
+		Routing: libp2p.DHTOption,
+		// This option sets the node to be a client DHT node (only fetching records)
+		// Routing: libp2p.DHTClientOption,
+		Repo: repo,
+	}
+	// Internally, ipfs decorates the context with a
+	// context.WithCancel. Which is then used for lifecycle management.
+	// We do not make use of this context and rely on calling
+	// Close() on the node instead
+	ctx := context.Background()
+	node, err := ipfscore.NewNode(ctx, nodeOptions)
+	if err != nil {
+		return nil, err
+	}
+	// run as daemon:
+	node.IsDaemon = true
+	return node, nil
+}
+
+func setupPlugins(path string, logger log.Logger) error {
+	// Load plugins. This will skip the repo if not available.
+	plugins, err := loader.NewPluginLoader(filepath.Join(path, "plugins"))
+	if err != nil {
+		return fmt.Errorf("error loading plugins: %s", err)
+	}
+	if err := plugins.Load(&nodes.LazyLedgerPlugin{}); err != nil {
+		return fmt.Errorf("error loading lazyledger plugin: %s", err)
+	}
+	if err := plugins.Initialize(); err != nil {
+		return fmt.Errorf("error initializing plugins: plugins.Initialize(): %s", err)
+	}
+	if err := plugins.Inject(); err != nil {
+		logger.Error("error initializing plugins: could not Inject()", "err", err)
+	}
+
+	return nil
 }
 
 // splitAndTrimEmpty slices s into all subslices separated by sep and returns a

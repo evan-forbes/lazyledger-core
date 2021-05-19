@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 
-	dbm "github.com/tendermint/tm-db"
-
 	"github.com/lazyledger/lazyledger-core/abci/example/code"
 	"github.com/lazyledger/lazyledger-core/abci/types"
+	dbm "github.com/lazyledger/lazyledger-core/libs/db"
+	memdb "github.com/lazyledger/lazyledger-core/libs/db/memdb"
 	"github.com/lazyledger/lazyledger-core/version"
 )
 
@@ -71,7 +71,7 @@ type Application struct {
 }
 
 func NewApplication() *Application {
-	state := loadState(dbm.NewMemDB())
+	state := loadState(memdb.NewDB())
 	return &Application{state: state}
 }
 
@@ -169,4 +169,9 @@ func (app *Application) Query(reqQuery types.RequestQuery) (resQuery types.Respo
 	resQuery.Height = app.state.Height
 
 	return resQuery
+}
+
+func (app *Application) PreprocessTxs(
+	req types.RequestPreprocessTxs) types.ResponsePreprocessTxs {
+	return types.ResponsePreprocessTxs{Txs: req.Txs}
 }
