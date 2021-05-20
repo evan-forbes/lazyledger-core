@@ -19,6 +19,7 @@ import (
 	"github.com/lazyledger/lazyledger-core/crypto/ed25519"
 	"github.com/lazyledger/lazyledger-core/crypto/tmhash"
 	"github.com/lazyledger/lazyledger-core/evidence"
+	"github.com/lazyledger/lazyledger-core/ipfs"
 	dbm "github.com/lazyledger/lazyledger-core/libs/db"
 	"github.com/lazyledger/lazyledger-core/libs/db/memdb"
 	"github.com/lazyledger/lazyledger-core/libs/log"
@@ -39,8 +40,7 @@ func TestNodeStartStop(t *testing.T) {
 	defer os.RemoveAll(config.RootDir)
 
 	// create & start node
-	n, err := DefaultNewNode(config, log.TestingLogger())
-	n.embedIpfsNode = false // TODO: or init ipfs upfront
+	n, err := DefaultNewNode(config, ipfs.Mock(), log.TestingLogger())
 	require.NoError(t, err)
 	err = n.Start()
 	require.NoError(t, err)
@@ -103,8 +103,7 @@ func TestNodeDelayedStart(t *testing.T) {
 	now := tmtime.Now()
 
 	// create & start node
-	n, err := DefaultNewNode(config, log.TestingLogger())
-	n.embedIpfsNode = false // TODO: or init ipfs upfront
+	n, err := DefaultNewNode(config, ipfs.Mock(), log.TestingLogger())
 	n.GenesisDoc().GenesisTime = now.Add(2 * time.Second)
 	require.NoError(t, err)
 
@@ -121,7 +120,7 @@ func TestNodeSetAppVersion(t *testing.T) {
 	defer os.RemoveAll(config.RootDir)
 
 	// create & start node
-	n, err := DefaultNewNode(config, log.TestingLogger())
+	n, err := DefaultNewNode(config, ipfs.Mock(), log.TestingLogger())
 	require.NoError(t, err)
 
 	// default config uses the kvstore app
@@ -143,12 +142,12 @@ func TestNodeSetPrivValTCP(t *testing.T) {
 	defer os.RemoveAll(config.RootDir)
 	config.BaseConfig.PrivValidatorListenAddr = addr
 
-	dialer := privval.DialTCPFn(addr, 100*time.Millisecond, ed25519.GenPrivKey())
+	dialer := privval.DialTCPFn(addr, time.Second, ed25519.GenPrivKey())
 	dialerEndpoint := privval.NewSignerDialerEndpoint(
 		log.TestingLogger(),
 		dialer,
 	)
-	privval.SignerDialerEndpointTimeoutReadWrite(100 * time.Millisecond)(dialerEndpoint)
+	privval.SignerDialerEndpointTimeoutReadWrite(time.Second)(dialerEndpoint)
 
 	signerServer := privval.NewSignerServer(
 		dialerEndpoint,
@@ -164,7 +163,7 @@ func TestNodeSetPrivValTCP(t *testing.T) {
 	}()
 	defer signerServer.Stop() //nolint:errcheck // ignore for tests
 
-	n, err := DefaultNewNode(config, log.TestingLogger())
+	n, err := DefaultNewNode(config, ipfs.Mock(), log.TestingLogger())
 	require.NoError(t, err)
 	assert.IsType(t, &privval.RetrySignerClient{}, n.PrivValidator())
 }
@@ -177,7 +176,7 @@ func TestPrivValidatorListenAddrNoProtocol(t *testing.T) {
 	defer os.RemoveAll(config.RootDir)
 	config.BaseConfig.PrivValidatorListenAddr = addrNoPrefix
 
-	_, err := DefaultNewNode(config, log.TestingLogger())
+	_, err := DefaultNewNode(config, ipfs.Mock(), log.TestingLogger())
 	assert.Error(t, err)
 }
 
@@ -194,7 +193,7 @@ func TestNodeSetPrivValIPC(t *testing.T) {
 		log.TestingLogger(),
 		dialer,
 	)
-	privval.SignerDialerEndpointTimeoutReadWrite(100 * time.Millisecond)(dialerEndpoint)
+	privval.SignerDialerEndpointTimeoutReadWrite(time.Second)(dialerEndpoint)
 
 	pvsc := privval.NewSignerServer(
 		dialerEndpoint,
@@ -208,7 +207,7 @@ func TestNodeSetPrivValIPC(t *testing.T) {
 	}()
 	defer pvsc.Stop() //nolint:errcheck // ignore for tests
 
-	n, err := DefaultNewNode(config, log.TestingLogger())
+	n, err := DefaultNewNode(config, ipfs.Mock(), log.TestingLogger())
 	require.NoError(t, err)
 	assert.IsType(t, &privval.RetrySignerClient{}, n.PrivValidator())
 }
@@ -522,6 +521,7 @@ func TestNodeNewNodeCustomReactors(t *testing.T) {
 		proxy.DefaultClientCreator(config.ProxyApp, config.ABCI, config.DBDir()),
 		DefaultGenesisDocProviderFunc(config),
 		DefaultDBProvider,
+		ipfs.Mock(),
 		DefaultMetricsProvider(config.Instrumentation),
 		log.TestingLogger(),
 		CustomReactors(map[string]p2p.Reactor{"FOO": cr, "BLOCKCHAIN": customBlockchainReactor}),
