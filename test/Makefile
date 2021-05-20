@@ -55,7 +55,7 @@ test100:
 ### go tests
 test:
 	@echo "--> Running go test"
-	@go test -p 1 $(PACKAGES) -tags deadlock
+	@go test -p 1 $(PACKAGES) -timeout 18m -tags deadlock
 .PHONY: test
 
 test_race:
