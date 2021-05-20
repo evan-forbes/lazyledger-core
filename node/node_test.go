@@ -537,7 +537,7 @@ func state(nVals int, height int64) (sm.State, dbm.DB, []types.PrivValidator) {
 	privVals := make([]types.PrivValidator, nVals)
 	vals := make([]types.GenesisValidator, nVals)
 	for i := 0; i < nVals; i++ {
-		privVal := types.NewMockPV()
+		privVal := types.NewTestKey()
 		privVals[i] = privVal
 		vals[i] = types.GenesisValidator{
 			Address: privVal.PrivKey.PubKey().Address(),

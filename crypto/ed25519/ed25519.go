@@ -104,6 +104,10 @@ func GenPrivKey() PrivKey {
 	return genPrivKey(crypto.CReader())
 }
 
+func GenTestPrivKey() PrivKey {
+	return PrivKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{1}, 32)))
+}
+
 // genPrivKey generates a new ed25519 private key using the provided reader.
 func genPrivKey(rand io.Reader) PrivKey {
 	seed := make([]byte, SeedSize)

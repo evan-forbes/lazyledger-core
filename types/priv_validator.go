@@ -57,6 +57,10 @@ func NewMockPV() MockPV {
 	return MockPV{ed25519.GenPrivKey(), false, false}
 }
 
+func NewTestKey() MockPV {
+	return MockPV{ed25519.GenTestPrivKey(), false, false}
+}
+
 // NewMockPVWithParams allows one to create a MockPV instance, but with finer
 // grained control over the operation of the mock validator. This is useful for
 // mocking test failures.
