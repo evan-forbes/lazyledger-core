@@ -126,7 +126,7 @@ func (dah *DataAvailabilityHeader) Hash() []byte {
 // ValidateBasic runs stateless checks on the DataAvailabilityHeader. Calls Hash() if not already called
 func (dah *DataAvailabilityHeader) ValidateBasic() error {
 	if dah == nil {
-		return errors.New("nil header is invalid")
+		return nil
 	}
 	if dah.IsZero() {
 		return errors.New("must have at least one row and column roots")
