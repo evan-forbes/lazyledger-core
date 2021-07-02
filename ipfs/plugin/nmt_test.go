@@ -1,4 +1,4 @@
-package nodes
+package plugin
 
 import (
 	"bytes"
@@ -75,7 +75,7 @@ func TestNodeCollector(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			collector := newNodeCollector()
-			n := nmt.New(sha256.New(), nmt.NamespaceIDSize(namespaceSize), nmt.NodeVisitor(collector.visit))
+			n := nmt.New(sha256.New, nmt.NamespaceIDSize(namespaceSize), nmt.NodeVisitor(collector.visit))
 
 			for _, share := range tt.leafData {
 				err := n.Push(share)
@@ -96,7 +96,7 @@ func TestNodeCollector(t *testing.T) {
 				t.Errorf("hashes don't match\ngot: %v\nwant: %v", got, want)
 			}
 
-			if mustCidFromNamespacedSha256(rootDigest.Bytes()).String() != rootNodeCid.String() {
+			if MustCidFromNamespacedSha256(rootDigest.Bytes()).String() != rootNodeCid.String() {
 				t.Error("root cid nod and hash not identical")
 			}
 
@@ -116,9 +116,9 @@ func TestNodeCollector(t *testing.T) {
 			for _, node := range gotNodes {
 				hasMap[node.Cid().String()] = true
 			}
-			hasher := nmt.NewNmtHasher(sha256.New(), namespaceSize, true)
+			hasher := nmt.NewNmtHasher(sha256.New, namespaceSize, true)
 			for _, leaf := range tt.leafData {
-				leafCid := mustCidFromNamespacedSha256(hasher.HashLeaf(leaf))
+				leafCid := MustCidFromNamespacedSha256(hasher.HashLeaf(leaf))
 				_, has := hasMap[leafCid.String()]
 				if !has {
 					t.Errorf("leaf CID not found in collected nodes. missing: %s", leafCid.String())
@@ -138,7 +138,7 @@ func TestDagPutWithPlugin(t *testing.T) {
 	buf := createByteBufFromRawData(t, data)
 	printFirst := 10
 	t.Logf("first leaf, nid: %x, data: %x...", data[0][:namespaceSize], data[0][namespaceSize:namespaceSize+printFirst])
-	n := nmt.New(sha256.New())
+	n := nmt.New(sha256.New)
 	for _, share := range data {
 		err := n.Push(share)
 		if err != nil {

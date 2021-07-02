@@ -2,8 +2,6 @@ package types
 
 import (
 	"bytes"
-	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
@@ -12,9 +10,6 @@ import (
 
 	"github.com/gogo/protobuf/proto"
 	gogotypes "github.com/gogo/protobuf/types"
-	format "github.com/ipfs/go-ipld-format"
-
-	"github.com/lazyledger/nmt"
 	"github.com/lazyledger/nmt/namespace"
 	"github.com/lazyledger/rsmt2d"
 
@@ -26,9 +21,10 @@ import (
 	tmmath "github.com/lazyledger/lazyledger-core/libs/math"
 	"github.com/lazyledger/lazyledger-core/libs/protoio"
 	tmsync "github.com/lazyledger/lazyledger-core/libs/sync"
-	"github.com/lazyledger/lazyledger-core/p2p/ipld/plugin/nodes"
+	"github.com/lazyledger/lazyledger-core/p2p/ipld/wrapper"
 	tmproto "github.com/lazyledger/lazyledger-core/proto/tendermint/types"
 	tmversion "github.com/lazyledger/lazyledger-core/proto/tendermint/version"
+	"github.com/lazyledger/lazyledger-core/types/consts"
 	"github.com/lazyledger/lazyledger-core/version"
 )
 
@@ -36,7 +32,7 @@ const (
 	// MaxHeaderBytes is a maximum header size.
 	// NOTE: Because app hash can be of arbitrary size, the header is therefore not
 	// capped in size and thus this number should be seen as a soft max
-	MaxHeaderBytes int64 = 636
+	MaxHeaderBytes int64 = 637
 
 	// MaxOverheadForBlock - maximum overhead to encode a block (up to
 	// MaxBlockSizeBytes in size) not including it's parts except Data.
@@ -81,7 +77,7 @@ func (roots NmtRoots) Bytes() [][]byte {
 func NmtRootsFromBytes(in [][]byte) (roots NmtRoots, err error) {
 	roots = make([]namespace.IntervalDigest, len(in))
 	for i := 0; i < len(in); i++ {
-		roots[i], err = namespace.IntervalDigestFromBytes(NamespaceSize, in[i])
+		roots[i], err = namespace.IntervalDigestFromBytes(consts.NamespaceSize, in[i])
 		if err != nil {
 			return roots, err
 		}
@@ -217,7 +213,7 @@ func (b *Block) fillHeader() {
 	if b.LastCommitHash == nil {
 		b.LastCommitHash = b.LastCommit.Hash()
 	}
-	if b.DataHash == nil {
+	if b.DataHash == nil || b.DataAvailabilityHeader.hash == nil {
 		b.fillDataAvailabilityHeader()
 	}
 	if b.EvidenceHash == nil {
@@ -225,169 +221,51 @@ func (b *Block) fillHeader() {
 	}
 }
 
+// TODO: Move out from 'types' package
 // fillDataAvailabilityHeader fills in any remaining DataAvailabilityHeader fields
 // that are a function of the block data.
 func (b *Block) fillDataAvailabilityHeader() {
 	namespacedShares, dataSharesLen := b.Data.ComputeShares()
 	shares := namespacedShares.RawShares()
-	if len(shares) == 0 {
-		// no shares -> no row/colum roots -> hash(empty)
-		b.DataHash = b.DataAvailabilityHeader.Hash()
-		return
-	}
+
+	// create the nmt wrapper to generate row and col commitments
+	squareSize := uint32(math.Sqrt(float64(len(shares))))
+	tree := wrapper.NewErasuredNamespacedMerkleTree(uint64(squareSize))
 
 	// TODO(ismail): for better efficiency and a larger number shares
 	// we should switch to the rsmt2d.LeopardFF16 codec:
-	extendedDataSquare, err := rsmt2d.ComputeExtendedDataSquare(shares, rsmt2d.NewRSGF8Codec(), rsmt2d.NewDefaultTree)
+	extendedDataSquare, err := rsmt2d.ComputeExtendedDataSquare(shares, rsmt2d.NewRSGF8Codec(), tree.Constructor)
 	if err != nil {
 		panic(fmt.Sprintf("unexpected error: %v", err))
 	}
 
-	// record the widths
-	squareWidth := extendedDataSquare.Width()
+	// generate the row and col roots using the EDS and nmt wrapper
+	rowRoots := extendedDataSquare.RowRoots()
+	colRoots := extendedDataSquare.ColumnRoots()
 
 	b.DataAvailabilityHeader = DataAvailabilityHeader{
-		RowsRoots:   make([]namespace.IntervalDigest, squareWidth),
-		ColumnRoots: make([]namespace.IntervalDigest, squareWidth),
+		RowsRoots:   make([]namespace.IntervalDigest, extendedDataSquare.Width()),
+		ColumnRoots: make([]namespace.IntervalDigest, extendedDataSquare.Width()),
 	}
 
-	// flatten the square and add namespaces
-	leaves := flattenNamespacedEDS(namespacedShares, extendedDataSquare)
-
-	// compute the roots for each col/row
-	for i, leafSet := range leaves {
-		commitment := nmtCommitment(leafSet)
-
-		// add the commitment to the header
-		if uint(i) < squareWidth {
-			b.DataAvailabilityHeader.ColumnRoots[i] = commitment
-		} else {
-			b.DataAvailabilityHeader.RowsRoots[uint(i)-squareWidth] = commitment
+	// todo(evan): remove interval digests
+	// convert the roots to interval digests
+	for i := 0; i < len(rowRoots); i++ {
+		rowRoot, err := namespace.IntervalDigestFromBytes(consts.NamespaceSize, rowRoots[i])
+		if err != nil {
+			panic(err)
 		}
+		colRoot, err := namespace.IntervalDigestFromBytes(consts.NamespaceSize, colRoots[i])
+		if err != nil {
+			panic(err)
+		}
+		b.DataAvailabilityHeader.RowsRoots[i] = rowRoot
+		b.DataAvailabilityHeader.ColumnRoots[i] = colRoot
 	}
 
 	// return the root hash of DA Header
 	b.DataHash = b.DataAvailabilityHeader.Hash()
 	b.NumOriginalDataShares = uint64(dataSharesLen)
-}
-
-// nmtcommitment generates the nmt root of some namespaced data
-func nmtCommitment(namespacedData [][]byte) namespace.IntervalDigest {
-	tree := nmt.New(newBaseHashFunc(), nmt.NamespaceIDSize(NamespaceSize))
-	for _, leaf := range namespacedData {
-		mustPush(tree, leaf)
-	}
-	return tree.Root()
-}
-
-func mustPush(rowTree *nmt.NamespacedMerkleTree, nidAndData []byte) {
-	if err := rowTree.Push(nidAndData); err != nil {
-		panic(
-			fmt.Sprintf(
-				"invalid data; could not push share to tree, id: %v, data: %v, err: %v",
-				nidAndData[:NamespaceSize],
-				nidAndData[NamespaceSize:],
-				err,
-			),
-		)
-	}
-}
-
-// PutBlock posts and pins erasured block data to IPFS using the provided
-// ipld.NodeAdder. Note: the erasured data is currently recomputed
-func (b *Block) PutBlock(ctx context.Context, nodeAdder format.NodeAdder) error {
-	if nodeAdder == nil {
-		return errors.New("no ipfs node adder provided")
-	}
-
-	// recompute the shares
-	namespacedShares, _ := b.Data.ComputeShares()
-	shares := namespacedShares.RawShares()
-
-	// don't do anything if there is no data to put on IPFS
-	if len(shares) == 0 {
-		return nil
-	}
-
-	// recompute the eds
-	eds, err := rsmt2d.ComputeExtendedDataSquare(shares, rsmt2d.NewRSGF8Codec(), rsmt2d.NewDefaultTree)
-	if err != nil {
-		return fmt.Errorf("failure to recompute the extended data square: %w", err)
-	}
-
-	// add namespaces to erasured shares and flatten the eds
-	leaves := flattenNamespacedEDS(namespacedShares, eds)
-
-	// create nmt adder wrapping batch adder
-	batchAdder := nodes.NewNmtNodeAdder(ctx, format.NewBatch(ctx, nodeAdder))
-
-	// iterate through each set of col and row leaves
-	for _, leafSet := range leaves {
-		tree := nmt.New(sha256.New(), nmt.NodeVisitor(batchAdder.Visit))
-		for _, share := range leafSet {
-			err = tree.Push(share)
-			if err != nil {
-				return err
-			}
-		}
-
-		// compute the root in order to collect the ipld.Nodes
-		tree.Root()
-	}
-
-	// commit the batch to ipfs
-	return batchAdder.Commit()
-}
-
-// flattenNamespacedEDS returns a flattend extendedDataSquare with namespaces
-// added to each share. NOTE: output is columns first then rows
-func flattenNamespacedEDS(nss NamespacedShares, eds *rsmt2d.ExtendedDataSquare) [][][]byte {
-	squareWidth := eds.Width()
-	originalDataWidth := squareWidth / 2
-
-	if uint(len(nss)) != originalDataWidth*originalDataWidth {
-		panic(
-			fmt.Sprintf(
-				"unexpected numbers of namespaces: actual %d expected %d",
-				len(nss),
-				squareWidth/2,
-			),
-		)
-	}
-
-	leaves := make([][][]byte, 2*squareWidth)
-	// this is adding the namespace back to Q1 shares and the parity ns to the
-	// rest of the quadrants and flattens the square
-	for i := uint(0); i < squareWidth; i++ {
-		rowLeaves := make([][]byte, squareWidth)
-		colLeaves := make([][]byte, squareWidth)
-
-		for j := uint(0); j < squareWidth; j++ {
-			if i < originalDataWidth && j < originalDataWidth {
-				rowShare := nss[i*originalDataWidth+j]
-				colShare := nss[j*originalDataWidth+i]
-				rowLeaves[j] = append(rowShare.NamespaceID(), rowShare.Data()...)
-				colLeaves[j] = append(colShare.NamespaceID(), colShare.Data()...)
-			} else {
-				rowData := eds.Row(i)
-				colData := eds.Column(i)
-				parityCellFromRow := rowData[j]
-				parityCellFromCol := colData[j]
-				rowLeaves[j] = append(copyOfParityNamespaceID(), parityCellFromRow...)
-				colLeaves[j] = append(copyOfParityNamespaceID(), parityCellFromCol...)
-			}
-		}
-		leaves[i] = colLeaves
-		leaves[i+squareWidth] = rowLeaves
-	}
-
-	return leaves
-}
-
-func copyOfParityNamespaceID() []byte {
-	out := make([]byte, len(ParitySharesNamespaceID))
-	copy(out, ParitySharesNamespaceID)
-	return out
 }
 
 // Hash computes and returns the block hash.
@@ -635,7 +513,8 @@ type Header struct {
 	Time    time.Time           `json:"time"`
 
 	// prev block info
-	LastBlockID BlockID `json:"last_block_id"`
+	LastBlockID       BlockID       `json:"last_block_id"`
+	LastPartSetHeader PartSetHeader `json:"last_part_set_header"`
 
 	// hashes of block data
 	LastCommitHash tmbytes.HexBytes `json:"last_commit_hash"` // commit from validators from the last block
@@ -661,8 +540,11 @@ type Header struct {
 // Populate the Header with state-derived data.
 // Call this after MakeBlock to complete the Header.
 func (h *Header) Populate(
-	version tmversion.Consensus, chainID string,
-	timestamp time.Time, lastBlockID BlockID,
+	version tmversion.Consensus,
+	chainID string,
+	timestamp time.Time,
+	lastBlockID BlockID,
+	lastPartSetHeader PartSetHeader,
 	valHash, nextValHash []byte,
 	consensusHash, appHash, lastResultsHash []byte,
 	proposerAddress Address,
@@ -670,6 +552,7 @@ func (h *Header) Populate(
 	h.Version = version
 	h.ChainID = chainID
 	h.Time = timestamp
+	h.LastPartSetHeader = lastPartSetHeader
 	h.LastBlockID = lastBlockID
 	h.ValidatorsHash = valHash
 	h.NextValidatorsHash = nextValHash
@@ -699,6 +582,10 @@ func (h Header) ValidateBasic() error {
 
 	if err := h.LastBlockID.ValidateBasic(); err != nil {
 		return fmt.Errorf("wrong LastBlockID: %w", err)
+	}
+
+	if err := h.LastPartSetHeader.ValidateBasic(); err != nil {
+		return fmt.Errorf("wrong PartSetHeader: %w", err)
 	}
 
 	if err := ValidateHash(h.LastCommitHash); err != nil {
@@ -764,12 +651,22 @@ func (h *Header) Hash() tmbytes.HexBytes {
 	if err != nil {
 		return nil
 	}
+
+	// todo(evan): double check that the partset header should still be included in the hash
+	pbpsh := h.LastPartSetHeader.ToProto()
+	bzpsh, err := pbpsh.Marshal()
+	if err != nil {
+		return nil
+	}
+
+	// todo(evan): include the last partsetheader in the hash
 	return merkle.HashFromByteSlices([][]byte{
 		hbz,
 		cdcEncode(h.ChainID),
 		cdcEncode(h.Height),
 		pbt,
 		bzbi,
+		bzpsh,
 		cdcEncode(h.LastCommitHash),
 		cdcEncode(h.DataHash),
 		cdcEncode(h.NumOriginalDataShares),
@@ -794,6 +691,7 @@ func (h *Header) StringIndented(indent string) string {
 %s  Height:         %v
 %s  Time:           %v
 %s  LastBlockID:    %v
+%s  LastPartSetHeader: %v
 %s  LastCommit:     %v
 %s  Data:           %v
 %s  Validators:     %v
@@ -809,6 +707,7 @@ func (h *Header) StringIndented(indent string) string {
 		indent, h.Height,
 		indent, h.Time,
 		indent, h.LastBlockID,
+		indent, h.LastPartSetHeader,
 		indent, h.LastCommitHash,
 		indent, h.DataHash,
 		indent, h.ValidatorsHash,
@@ -827,12 +726,15 @@ func (h *Header) ToProto() *tmproto.Header {
 		return nil
 	}
 
+	ppsh := h.LastPartSetHeader.ToProto()
+
 	return &tmproto.Header{
 		Version:               h.Version,
 		ChainID:               h.ChainID,
 		Height:                h.Height,
 		Time:                  h.Time,
 		LastBlockId:           h.LastBlockID.ToProto(),
+		LastPartSetHeader:     &ppsh,
 		ValidatorsHash:        h.ValidatorsHash,
 		NextValidatorsHash:    h.NextValidatorsHash,
 		ConsensusHash:         h.ConsensusHash,
@@ -860,12 +762,18 @@ func HeaderFromProto(ph *tmproto.Header) (Header, error) {
 		return Header{}, err
 	}
 
+	lpsh, err := PartSetHeaderFromProto(ph.LastPartSetHeader)
+	if err != nil {
+		return Header{}, err
+	}
+
 	h.Version = ph.Version
 	h.ChainID = ph.ChainID
 	h.Height = ph.Height
 	h.Time = ph.Time
 	h.Height = ph.Height
 	h.LastBlockID = *bi
+	h.LastPartSetHeader = *lpsh
 	h.ValidatorsHash = ph.ValidatorsHash
 	h.NextValidatorsHash = ph.NextValidatorsHash
 	h.ConsensusHash = ph.ConsensusHash
@@ -975,6 +883,21 @@ func (cs CommitSig) BlockID(commitBlockID BlockID) BlockID {
 	return blockID
 }
 
+func (cs CommitSig) PartSetHeader(commitPSH PartSetHeader) PartSetHeader {
+	var psh PartSetHeader
+	switch cs.BlockIDFlag {
+	case BlockIDFlagAbsent:
+		psh = PartSetHeader{}
+	case BlockIDFlagCommit:
+		psh = commitPSH
+	case BlockIDFlagNil:
+		psh = PartSetHeader{}
+	default:
+		panic(fmt.Sprintf("Unknown BlockIDFlag: %v", cs.BlockIDFlag))
+	}
+	return psh
+}
+
 // ValidateBasic performs basic validation.
 func (cs CommitSig) ValidateBasic() error {
 	switch cs.BlockIDFlag {
@@ -1050,11 +973,12 @@ type Commit struct {
 	// ValidatorSet order.
 	// Any peer with a block can gossip signatures by index with a peer without
 	// recalculating the active ValidatorSet.
-	Height     int64       `json:"height"`
-	Round      int32       `json:"round"`
-	BlockID    BlockID     `json:"block_id"`
-	Signatures []CommitSig `json:"signatures"`
-	HeaderHash []byte      `json:"header_hash"`
+	Height        int64         `json:"height"`
+	Round         int32         `json:"round"`
+	BlockID       BlockID       `json:"block_id"`
+	Signatures    []CommitSig   `json:"signatures"`
+	HeaderHash    []byte        `json:"header_hash"`
+	PartSetHeader PartSetHeader `json:"part_set_header"`
 
 	// Memoized in first call to corresponding method.
 	// NOTE: can't memoize in constructor because constructor isn't used for
@@ -1064,13 +988,14 @@ type Commit struct {
 }
 
 // NewCommit returns a new Commit.
-func NewCommit(height int64, round int32, blockID BlockID, commitSigs []CommitSig) *Commit {
+func NewCommit(height int64, round int32, blockID BlockID, commitSigs []CommitSig, psh PartSetHeader) *Commit {
 	return &Commit{
-		Height:     height,
-		Round:      round,
-		BlockID:    blockID,
-		Signatures: commitSigs,
-		HeaderHash: blockID.Hash,
+		Height:        height,
+		Round:         round,
+		BlockID:       blockID,
+		Signatures:    commitSigs,
+		HeaderHash:    blockID.Hash,
+		PartSetHeader: psh,
 	}
 }
 
@@ -1101,6 +1026,7 @@ func (commit *Commit) GetVote(valIdx int32) *Vote {
 		Height:           commit.Height,
 		Round:            commit.Round,
 		BlockID:          commitSig.BlockID(commit.BlockID),
+		PartSetHeader:    commitSig.PartSetHeader(commit.PartSetHeader),
 		Timestamp:        commitSig.Timestamp,
 		ValidatorAddress: commitSig.ValidatorAddress,
 		ValidatorIndex:   valIdx,
@@ -1240,12 +1166,14 @@ func (commit *Commit) StringIndented(indent string) string {
 %s  Height:     %d
 %s  Round:      %d
 %s  BlockID:    %v
+%s  PartSetHeader: %v
 %s  Signatures:
 %s    %v
 %s}#%v`,
 		indent, commit.Height,
 		indent, commit.Round,
 		indent, commit.BlockID,
+		indent, commit.PartSetHeader,
 		indent,
 		indent, strings.Join(commitSigStrings, "\n"+indent+"    "),
 		indent, commit.hash)
@@ -1264,10 +1192,13 @@ func (commit *Commit) ToProto() *tmproto.Commit {
 	}
 	c.Signatures = sigs
 
+	ppsh := commit.PartSetHeader.ToProto()
+
 	c.Height = commit.Height
 	c.Round = commit.Round
 	c.BlockID = commit.BlockID.ToProto()
 	c.HeaderHash = commit.HeaderHash
+	c.PartSetHeader = &ppsh
 
 	return c
 }
@@ -1288,6 +1219,8 @@ func CommitFromProto(cp *tmproto.Commit) (*Commit, error) {
 		return nil, err
 	}
 
+	psh, err := PartSetHeaderFromProto(cp.PartSetHeader)
+
 	sigs := make([]CommitSig, len(cp.Signatures))
 	for i := range cp.Signatures {
 		if err := sigs[i].FromProto(cp.Signatures[i]); err != nil {
@@ -1300,6 +1233,7 @@ func CommitFromProto(cp *tmproto.Commit) (*Commit, error) {
 	commit.Round = cp.Round
 	commit.BlockID = *bi
 	commit.HeaderHash = cp.HeaderHash
+	commit.PartSetHeader = *psh
 
 	return commit, commit.ValidateBasic()
 }
@@ -1350,7 +1284,7 @@ func (roots IntermediateStateRoots) splitIntoShares() NamespacedShares {
 		}
 		rawDatas = append(rawDatas, rawData)
 	}
-	shares := splitContiguous(IntermediateStateRootsNamespaceID, rawDatas)
+	shares := splitContiguous(consts.IntermediateStateRootsNamespaceID, rawDatas)
 	return shares
 }
 
@@ -1386,11 +1320,11 @@ func (data *Data) ComputeShares() (NamespacedShares, int) {
 	wantLen := paddedLen(curLen)
 
 	// ensure that the min square size is used
-	if wantLen < minSharecount {
-		wantLen = minSharecount
+	if wantLen < consts.MinSharecount {
+		wantLen = consts.MinSharecount
 	}
 
-	tailShares := GenerateTailPaddingShares(wantLen-curLen, ShareSize)
+	tailShares := GenerateTailPaddingShares(wantLen-curLen, consts.ShareSize)
 
 	return append(append(append(append(
 		txShares,
@@ -1660,7 +1594,7 @@ func (data *EvidenceData) splitIntoShares() NamespacedShares {
 		}
 		rawDatas = append(rawDatas, rawData)
 	}
-	shares := splitContiguous(EvidenceNamespaceID, rawDatas)
+	shares := splitContiguous(consts.EvidenceNamespaceID, rawDatas)
 	return shares
 }
 
@@ -1668,25 +1602,17 @@ func (data *EvidenceData) splitIntoShares() NamespacedShares {
 
 // BlockID
 type BlockID struct {
-	Hash          tmbytes.HexBytes `json:"hash"`
-	PartSetHeader PartSetHeader    `json:"part_set_header"`
+	Hash tmbytes.HexBytes `json:"hash"`
 }
 
 // Equals returns true if the BlockID matches the given BlockID
 func (blockID BlockID) Equals(other BlockID) bool {
-	return bytes.Equal(blockID.Hash, other.Hash) &&
-		blockID.PartSetHeader.Equals(other.PartSetHeader)
+	return bytes.Equal(blockID.Hash, other.Hash)
 }
 
 // Key returns a machine-readable string representation of the BlockID
 func (blockID BlockID) Key() string {
-	pbph := blockID.PartSetHeader.ToProto()
-	bz, err := pbph.Marshal()
-	if err != nil {
-		panic(err)
-	}
-
-	return string(blockID.Hash) + string(bz)
+	return string(blockID.Hash)
 }
 
 // ValidateBasic performs basic validation.
@@ -1695,23 +1621,17 @@ func (blockID BlockID) ValidateBasic() error {
 	if err := ValidateHash(blockID.Hash); err != nil {
 		return fmt.Errorf("wrong Hash")
 	}
-	if err := blockID.PartSetHeader.ValidateBasic(); err != nil {
-		return fmt.Errorf("wrong PartSetHeader: %v", err)
-	}
 	return nil
 }
 
 // IsZero returns true if this is the BlockID of a nil block.
 func (blockID BlockID) IsZero() bool {
-	return len(blockID.Hash) == 0 &&
-		blockID.PartSetHeader.IsZero()
+	return len(blockID.Hash) == 0
 }
 
 // IsComplete returns true if this is a valid BlockID of a non-nil block.
 func (blockID BlockID) IsComplete() bool {
-	return len(blockID.Hash) == tmhash.Size &&
-		blockID.PartSetHeader.Total > 0 &&
-		len(blockID.PartSetHeader.Hash) == tmhash.Size
+	return len(blockID.Hash) == tmhash.Size
 }
 
 // String returns a human readable string representation of the BlockID.
@@ -1721,7 +1641,7 @@ func (blockID BlockID) IsComplete() bool {
 //
 // See PartSetHeader#String
 func (blockID BlockID) String() string {
-	return fmt.Sprintf(`%v:%v`, blockID.Hash, blockID.PartSetHeader)
+	return fmt.Sprintf(`%v`, blockID.Hash)
 }
 
 // ToProto converts BlockID to protobuf
@@ -1731,8 +1651,7 @@ func (blockID *BlockID) ToProto() tmproto.BlockID {
 	}
 
 	return tmproto.BlockID{
-		Hash:          blockID.Hash,
-		PartSetHeader: blockID.PartSetHeader.ToProto(),
+		Hash: blockID.Hash,
 	}
 }
 
@@ -1744,12 +1663,6 @@ func BlockIDFromProto(bID *tmproto.BlockID) (*BlockID, error) {
 	}
 
 	blockID := new(BlockID)
-	ph, err := PartSetHeaderFromProto(&bID.PartSetHeader)
-	if err != nil {
-		return nil, err
-	}
-
-	blockID.PartSetHeader = *ph
 	blockID.Hash = bID.Hash
 
 	return blockID, blockID.ValidateBasic()

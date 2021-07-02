@@ -9,12 +9,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ipfs/go-blockservice"
+	offline "github.com/ipfs/go-ipfs-exchange-offline"
+	"github.com/ipfs/go-merkledag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	abcicli "github.com/lazyledger/lazyledger-core/abci/client"
 	abci "github.com/lazyledger/lazyledger-core/abci/types"
 	"github.com/lazyledger/lazyledger-core/evidence"
+	"github.com/lazyledger/lazyledger-core/ipfs"
 	"github.com/lazyledger/lazyledger-core/libs/db/memdb"
 	"github.com/lazyledger/lazyledger-core/libs/log"
 	"github.com/lazyledger/lazyledger-core/libs/service"
@@ -55,7 +59,9 @@ func TestByzantinePrevoteEquivocation(t *testing.T) {
 		app.InitChain(abci.RequestInitChain{Validators: vals})
 
 		blockDB := memdb.NewDB()
-		blockStore := store.NewBlockStore(blockDB)
+		bs := ipfs.MockBlockStore()
+		dag := merkledag.NewDAGService(blockservice.New(bs, offline.Exchange(bs)))
+		blockStore := store.NewBlockStore(blockDB, bs, log.TestingLogger())
 
 		// one for mempool, one for consensus
 		mtx := new(tmsync.Mutex)
@@ -77,7 +83,8 @@ func TestByzantinePrevoteEquivocation(t *testing.T) {
 
 		// Make State
 		blockExec := sm.NewBlockExecutor(stateStore, log.TestingLogger(), proxyAppConnCon, mempool, evpool)
-		cs := NewState(thisConfig.Consensus, state, blockExec, blockStore, mempool, evpool)
+		cs := NewState(thisConfig.Consensus, state, blockExec, blockStore,
+			mempool, dag, ipfs.MockRouting(), evpool)
 		cs.SetLogger(cs.Logger)
 		// set private validator
 		pv := privVals[i]
@@ -91,7 +98,6 @@ func TestByzantinePrevoteEquivocation(t *testing.T) {
 
 		cs.SetTimeoutTicker(tickerFunc())
 		cs.SetLogger(logger)
-
 		css[i] = cs
 	}
 
@@ -215,7 +221,12 @@ func TestByzantineConflictingProposalsWithPartition(t *testing.T) {
 	N := 4
 	logger := consensusLogger().With("test", "byzantine")
 	app := newCounter
-	css, cleanup := randConsensusNet(N, "consensus_byzantine_test", newMockTickerFunc(false), app)
+	css, cleanup := randConsensusNet(
+		N,
+		"consensus_byzantine_test",
+		newMockTickerFunc(false),
+		app,
+	)
 	defer cleanup()
 
 	// give the byzantine validator a normal ticker
@@ -374,8 +385,8 @@ func byzantineDecideProposalFunc(t *testing.T, height int64, round int32, cs *St
 
 	// Create a new proposal block from state/txs from the mempool.
 	block1, blockParts1 := cs.createProposalBlock()
-	polRound, propBlockID := cs.ValidRound, types.BlockID{Hash: block1.Hash(), PartSetHeader: blockParts1.Header()}
-	proposal1 := types.NewProposal(height, round, polRound, propBlockID, &block1.DataAvailabilityHeader)
+	polRound, propBlockID := cs.ValidRound, types.BlockID{Hash: block1.Hash()}
+	proposal1 := types.NewProposal(height, round, polRound, propBlockID, &block1.DataAvailabilityHeader, blockParts1.Header())
 	p1, err := proposal1.ToProto()
 	require.NoError(t, err)
 	if err := cs.privValidator.SignProposal(cs.state.ChainID, p1); err != nil {
@@ -389,8 +400,8 @@ func byzantineDecideProposalFunc(t *testing.T, height int64, round int32, cs *St
 
 	// Create a new proposal block from state/txs from the mempool.
 	block2, blockParts2 := cs.createProposalBlock()
-	polRound, propBlockID = cs.ValidRound, types.BlockID{Hash: block2.Hash(), PartSetHeader: blockParts2.Header()}
-	proposal2 := types.NewProposal(height, round, polRound, propBlockID, &block2.DataAvailabilityHeader)
+	polRound, propBlockID = cs.ValidRound, types.BlockID{Hash: block2.Hash()}
+	proposal2 := types.NewProposal(height, round, polRound, propBlockID, &block2.DataAvailabilityHeader, blockParts2.Header())
 	p2, err := proposal2.ToProto()
 	require.NoError(t, err)
 	if err := cs.privValidator.SignProposal(cs.state.ChainID, p2); err != nil {

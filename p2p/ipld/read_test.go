@@ -8,163 +8,62 @@ import (
 	"math"
 	"math/rand"
 	"sort"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/ipfs/go-cid"
-	"github.com/ipfs/go-ipfs/core/coreapi"
-	coremock "github.com/ipfs/go-ipfs/core/mock"
 	format "github.com/ipfs/go-ipld-format"
-	iface "github.com/ipfs/interface-go-ipfs-core"
+	mdutils "github.com/ipfs/go-merkledag/test"
 	"github.com/lazyledger/nmt"
 	"github.com/lazyledger/nmt/namespace"
 	"github.com/lazyledger/rsmt2d"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/lazyledger/lazyledger-core/p2p/ipld/plugin/nodes"
+	"github.com/lazyledger/lazyledger-core/ipfs"
+	"github.com/lazyledger/lazyledger-core/ipfs/plugin"
+	"github.com/lazyledger/lazyledger-core/libs/log"
+	"github.com/lazyledger/lazyledger-core/p2p/ipld/wrapper"
 	"github.com/lazyledger/lazyledger-core/types"
+	"github.com/lazyledger/lazyledger-core/types/consts"
 )
 
-var raceDetectorActive = false
-
-func TestLeafPath(t *testing.T) {
-	type test struct {
-		name         string
-		index, total uint32
-		expected     []string
-	}
-
-	// test cases
-	tests := []test{
-		{"nil", 0, 0, []string(nil)},
-		{"0 index 16 total leaves", 0, 16, strings.Split("0/0/0/0", "/")},
-		{"1 index 16 total leaves", 1, 16, strings.Split("0/0/0/1", "/")},
-		{"9 index 16 total leaves", 9, 16, strings.Split("1/0/0/1", "/")},
-		{"15 index 16 total leaves", 15, 16, strings.Split("1/1/1/1", "/")},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			result, err := leafPath(tt.index, tt.total)
-			if err != nil {
-				t.Error(err)
-			}
-			assert.Equal(t, tt.expected, result)
-		},
-		)
-	}
-}
-
-func Test_isPowerOf2(t *testing.T) {
-	type test struct {
-		input    uint32
-		expected bool
-	}
-	tests := []test{
-		{
-			input:    2,
-			expected: true,
-		},
-		{
-			input:    11,
-			expected: false,
-		},
-		{
-			input:    511,
-			expected: false,
-		},
-
-		{
-			input:    0,
-			expected: true,
-		},
-		{
-			input:    1,
-			expected: true,
-		},
-		{
-			input:    16,
-			expected: true,
-		},
-	}
-	for _, tt := range tests {
-		res := isPowerOf2(tt.input)
-		assert.Equal(t, tt.expected, res, fmt.Sprintf("input was %d", tt.input))
-	}
-}
-
 func TestGetLeafData(t *testing.T) {
-	type test struct {
-		name    string
-		timeout time.Duration
-		rootCid cid.Cid
-		leaves  [][]byte
-	}
+	const leaves = 16
 
-	// create the context and batch needed for node collection from the tree
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	// issue a new API object
-	ipfsAPI := mockedIpfsAPI(t)
-	batch := format.NewBatch(ctx, ipfsAPI.Dag())
-
 	// generate random data for the nmt
-	data := generateRandNamespacedRawData(16, types.NamespaceSize, types.ShareSize)
+	data := generateRandNamespacedRawData(leaves, consts.NamespaceSize, consts.ShareSize)
 
 	// create a random tree
-	root, err := getNmtRoot(ctx, batch, data)
-	if err != nil {
-		t.Error(err)
-	}
+	dag := mdutils.Mock()
+	root, err := getNmtRoot(ctx, dag, data)
+	require.NoError(t, err)
 
 	// compute the root and create a cid for the root hash
-	rootCid, err := nodes.CidFromNamespacedSha256(root.Bytes())
-	if err != nil {
-		t.Error(err)
-	}
+	rootCid, err := plugin.CidFromNamespacedSha256(root.Bytes())
+	require.NoError(t, err)
 
-	// test cases
-	tests := []test{
-		{"16 leaves", time.Second, rootCid, data},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), tt.timeout)
-			defer cancel()
-			for i, leaf := range tt.leaves {
-				data, err := GetLeafData(ctx, tt.rootCid, uint32(i), uint32(len(tt.leaves)), ipfsAPI)
-				if err != nil {
-					t.Error(err)
-				}
-				assert.Equal(t, leaf, data)
-			}
-		},
-		)
+	for i, leaf := range data {
+		data, err := GetLeafData(ctx, rootCid, uint32(i), uint32(len(data)), dag)
+		assert.NoError(t, err)
+		assert.Equal(t, leaf, data)
 	}
 }
 
 func TestBlockRecovery(t *testing.T) {
-	// adjustedLeafSize describes the size of a leaf that will not get split
-	adjustedLeafSize := types.MsgShareSize
-
 	originalSquareWidth := 8
 	shareCount := originalSquareWidth * originalSquareWidth
 	extendedSquareWidth := 2 * originalSquareWidth
 	extendedShareCount := extendedSquareWidth * extendedSquareWidth
 
 	// generate test data
-	quarterShares := generateRandNamespacedRawData(shareCount, types.NamespaceSize, adjustedLeafSize)
-	allShares := generateRandNamespacedRawData(shareCount, types.NamespaceSize, adjustedLeafSize)
+	quarterShares := generateRandNamespacedRawData(shareCount, consts.NamespaceSize, consts.MsgShareSize)
+	allShares := generateRandNamespacedRawData(shareCount, consts.NamespaceSize, consts.MsgShareSize)
 
 	testCases := []struct {
-		name string
-		// blockData types.Data
+		name      string
 		shares    [][]byte
 		expectErr bool
 		errString string
@@ -172,7 +71,7 @@ func TestBlockRecovery(t *testing.T) {
 	}{
 		{"missing 1/2 shares", quarterShares, false, "", extendedShareCount / 2},
 		{"missing 1/4 shares", quarterShares, false, "", extendedShareCount / 4},
-		{"max missing data", quarterShares, false, "", ((originalSquareWidth + 1) * (originalSquareWidth + 1))},
+		{"max missing data", quarterShares, false, "", (originalSquareWidth + 1) * (originalSquareWidth + 1)},
 		{"missing all but one shares", allShares, true, "failed to solve data square", extendedShareCount - 1},
 	}
 	for _, tc := range testCases {
@@ -182,13 +81,11 @@ func TestBlockRecovery(t *testing.T) {
 			squareSize := uint64(math.Sqrt(float64(len(tc.shares))))
 
 			// create trees for creating roots
-			tree := NewErasuredNamespacedMerkleTree(squareSize)
-			recoverTree := NewErasuredNamespacedMerkleTree(squareSize)
+			tree := wrapper.NewErasuredNamespacedMerkleTree(squareSize)
+			recoverTree := wrapper.NewErasuredNamespacedMerkleTree(squareSize)
 
 			eds, err := rsmt2d.ComputeExtendedDataSquare(tc.shares, rsmt2d.NewRSGF8Codec(), tree.Constructor)
-			if err != nil {
-				t.Error(err)
-			}
+			require.NoError(t, err)
 
 			// calculate roots using the first complete square
 			rowRoots := eds.RowRoots()
@@ -210,7 +107,6 @@ func TestBlockRecovery(t *testing.T) {
 				require.Contains(t, err.Error(), tc.errString)
 				return
 			}
-
 			assert.NoError(t, err)
 
 			// check that the squares are equal
@@ -220,76 +116,68 @@ func TestBlockRecovery(t *testing.T) {
 }
 
 func TestRetrieveBlockData(t *testing.T) {
+	logger := log.TestingLogger()
 	type test struct {
 		name       string
 		squareSize int
 		expectErr  bool
 		errStr     string
 	}
-
-	// issue a new API object
-	ipfsAPI := mockedIpfsAPI(t)
-
-	// the max size of messages that won't get split
-	adjustedMsgSize := types.MsgShareSize - 2
-
 	tests := []test{
 		{"Empty block", 1, false, ""},
 		{"4 KB block", 4, false, ""},
 		{"16 KB block", 8, false, ""},
-		{"16 KB block timeout expected", 8, true, "timeout"},
-		{"max square size", types.MaxSquareSize, false, ""},
+		{"16 KB block timeout expected", 8, true, "not found"},
+		{"max square size", consts.MaxSquareSize, false, ""},
 	}
 
 	for _, tc := range tests {
+		// TODO(Wondertan): remove this
+		if tc.squareSize > 8 {
+			continue
+		}
+
 		tc := tc
-
 		t.Run(fmt.Sprintf("%s size %d", tc.name, tc.squareSize), func(t *testing.T) {
-			// if we're using the race detector, skip some large tests due to time and
-			// concurrency constraints
-			if raceDetectorActive && tc.squareSize > 8 {
-				t.Skip("Not running large test due to time and concurrency constraints while race detector is active.")
-			}
+			ctx := context.Background()
+			dag := mdutils.Mock()
+			croute := ipfs.MockRouting()
 
-			background := context.Background()
-			blockData := generateRandomBlockData(tc.squareSize*tc.squareSize, adjustedMsgSize)
-			block := types.Block{
+			blockData := generateRandomBlockData(tc.squareSize*tc.squareSize, consts.MsgShareSize-2)
+			block := &types.Block{
 				Data:       blockData,
 				LastCommit: &types.Commit{},
 			}
 
 			// if an error is exected, don't put the block
 			if !tc.expectErr {
-				err := block.PutBlock(background, ipfsAPI.Dag())
-				if err != nil {
-					t.Fatal(err)
-				}
+				err := PutBlock(ctx, dag, block, croute, logger)
+				require.NoError(t, err)
 			}
 
 			shareData, _ := blockData.ComputeShares()
 			rawData := shareData.RawShares()
 
-			tree := NewErasuredNamespacedMerkleTree(uint64(tc.squareSize))
+			tree := wrapper.NewErasuredNamespacedMerkleTree(uint64(tc.squareSize))
 			eds, err := rsmt2d.ComputeExtendedDataSquare(rawData, rsmt2d.NewRSGF8Codec(), tree.Constructor)
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err)
 
 			rawRowRoots := eds.RowRoots()
 			rawColRoots := eds.ColumnRoots()
 			rowRoots := rootsToDigests(rawRowRoots)
 			colRoots := rootsToDigests(rawColRoots)
 
-			retrievalCtx, cancel := context.WithTimeout(background, time.Second*2)
+			// limit with deadline retrieval specifically
+			ctx, cancel := context.WithTimeout(ctx, time.Second*2)
 			defer cancel()
 
 			rblockData, err := RetrieveBlockData(
-				retrievalCtx,
+				ctx,
 				&types.DataAvailabilityHeader{
 					RowsRoots:   rowRoots,
 					ColumnRoots: colRoots,
 				},
-				ipfsAPI,
+				dag,
 				rsmt2d.NewRSGF8Codec(),
 			)
 
@@ -298,11 +186,9 @@ func TestRetrieveBlockData(t *testing.T) {
 				require.Contains(t, err.Error(), tc.errStr)
 				return
 			}
-
 			require.NoError(t, err)
 
 			nsShares, _ := rblockData.ComputeShares()
-
 			assert.Equal(t, rawData, nsShares.RawShares())
 		})
 	}
@@ -324,11 +210,11 @@ func flatten(eds *rsmt2d.ExtendedDataSquare) [][]byte {
 // getNmtRoot generates the nmt root of some namespaced data
 func getNmtRoot(
 	ctx context.Context,
-	batch *format.Batch,
+	dag format.NodeAdder,
 	namespacedData [][]byte,
 ) (namespace.IntervalDigest, error) {
-	na := nodes.NewNmtNodeAdder(ctx, batch)
-	tree := nmt.New(sha256.New(), nmt.NamespaceIDSize(types.NamespaceSize), nmt.NodeVisitor(na.Visit))
+	na := NewNmtNodeAdder(ctx, format.NewBatch(ctx, dag))
+	tree := nmt.New(sha256.New, nmt.NamespaceIDSize(consts.NamespaceSize), nmt.NodeVisitor(na.Visit))
 	for _, leaf := range namespacedData {
 		err := tree.Push(leaf)
 		if err != nil {
@@ -386,7 +272,7 @@ func removeRandShares(data [][]byte, d int) [][]byte {
 func rootsToDigests(roots [][]byte) []namespace.IntervalDigest {
 	out := make([]namespace.IntervalDigest, len(roots))
 	for i, root := range roots {
-		idigest, err := namespace.IntervalDigestFromBytes(types.NamespaceSize, root)
+		idigest, err := namespace.IntervalDigestFromBytes(consts.NamespaceSize, root)
 		if err != nil {
 			panic(err)
 		}
@@ -406,12 +292,12 @@ func generateRandomBlockData(msgCount, msgSize int) types.Data {
 }
 
 func generateRandomMessages(count, msgSize int) types.Messages {
-	shares := generateRandNamespacedRawData(count, types.NamespaceSize, msgSize)
+	shares := generateRandNamespacedRawData(count, consts.NamespaceSize, msgSize)
 	msgs := make([]types.Message, count)
 	for i, s := range shares {
 		msgs[i] = types.Message{
-			Data:        s[types.NamespaceSize:],
-			NamespaceID: s[:types.NamespaceSize],
+			Data:        s[consts.NamespaceSize:],
+			NamespaceID: s[:consts.NamespaceSize],
 		}
 	}
 	return types.Messages{MessagesList: msgs}
@@ -419,7 +305,7 @@ func generateRandomMessages(count, msgSize int) types.Messages {
 
 func generateRandomContiguousShares(count int) types.Txs {
 	// the size of a length delimited tx that takes up an entire share
-	const adjustedTxSize = types.TxShareSize - 2
+	const adjustedTxSize = consts.TxShareSize - 2
 	txs := make(types.Txs, count)
 	for i := 0; i < count; i++ {
 		tx := make([]byte, adjustedTxSize)
@@ -430,19 +316,4 @@ func generateRandomContiguousShares(count int) types.Txs {
 		txs[i] = types.Tx(tx)
 	}
 	return txs
-}
-
-func mockedIpfsAPI(t *testing.T) iface.CoreAPI {
-	ipfsNode, err := coremock.NewMockNode()
-	if err != nil {
-		t.Error(err)
-	}
-
-	// issue a new API object
-	ipfsAPI, err := coreapi.NewCoreAPI(ipfsNode)
-	if err != nil {
-		t.Error(err)
-	}
-
-	return ipfsAPI
 }

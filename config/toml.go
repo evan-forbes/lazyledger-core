@@ -120,9 +120,6 @@ priv-validator-laddr = "{{ .BaseConfig.PrivValidatorListenAddr }}"
 # Path to the JSON file containing the private key to use for node authentication in the p2p protocol
 node-key-file = "{{ js .BaseConfig.NodeKey }}"
 
-# Mechanism to connect to the ABCI application: socket | grpc
-abci = "{{ .BaseConfig.ABCI }}"
-
 # If true, query the ABCI app on connecting to a new peer
 # so the app can decide if we should keep the connection or not
 filter-peers = {{ .BaseConfig.FilterPeers }}
@@ -439,23 +436,9 @@ namespace = "{{ .Instrumentation.Namespace }}"
 #######################################################
 [ipfs]
 
-# IPFS repo root.
-repo-root = "{{ .IPFS.ConfigRootPath}}"
-
-## Below options will be passed to ipfs when initializing an ipfs repo.
-## They will be written into the repo-root/config on init.
-## To modify the generated config, edit repo-root/config accordingly.
-
-# Address for the local API (RPC).
-api = "{{ .IPFS.API }}"
-# Address to listen on for IPFS HTTP object gateway.
-gateway = "{{ .IPFS.Gateway }}"
-# Addresses for the swarm to listen on
-swarm = [{{ range .IPFS.Swarm }}{{ printf "%q, " . }}{{end}}]
-# Swarm addresses to announce to the network
-announce = [{{ range .IPFS.Announce }}{{ printf "%q, " . }}{{end}}]
-# Swarm addresses not to announce to the network
-no-announce = [{{ range .IPFS.NoAnnounce }}{{ printf "%q, " . }}{{end}}]
+# IPFS related configuration
+repo-path = "{{ .IPFS.RepoPath}}"
+serve-api = "{{ .IPFS.ServeAPI}}"
 `
 
 /****** these are for test settings ***********/

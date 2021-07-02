@@ -1,6 +1,7 @@
 package v0
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"os"
@@ -68,10 +69,9 @@ func newBlockchainReactor(
 		panic(fmt.Errorf("error start app: %w", err))
 	}
 
-	blockDB := memdb.NewDB()
 	stateDB := memdb.NewDB()
 	stateStore := sm.NewStore(stateDB)
-	blockStore := store.NewBlockStore(blockDB)
+	blockStore := store.MockBlockStore(nil)
 
 	state, err := stateStore.LoadFromDBOrGenesisDoc(genDoc)
 	if err != nil {
@@ -96,14 +96,18 @@ func newBlockchainReactor(
 
 	// let's add some blocks in
 	for blockHeight := int64(1); blockHeight <= maxBlockHeight; blockHeight++ {
-		lastCommit := types.NewCommit(blockHeight-1, 0, types.BlockID{}, nil)
+		lastCommit := types.NewCommit(blockHeight-1, 0, types.BlockID{}, nil, types.PartSetHeader{})
 		if blockHeight > 1 {
 			lastBlockMeta := blockStore.LoadBlockMeta(blockHeight - 1)
-			lastBlock := blockStore.LoadBlock(blockHeight - 1)
+			lastBlock, err := blockStore.LoadBlock(context.TODO(), blockHeight-1)
+			if err != nil {
+				panic(err)
+			}
 
 			vote, err := types.MakeVote(
 				lastBlock.Header.Height,
 				lastBlockMeta.BlockID,
+				lastBlockMeta.PartSetHeader,
 				state.Validators,
 				privVals[0],
 				lastBlock.Header.ChainID,
@@ -113,20 +117,23 @@ func newBlockchainReactor(
 				panic(err)
 			}
 			lastCommit = types.NewCommit(vote.Height, vote.Round,
-				lastBlockMeta.BlockID, []types.CommitSig{vote.CommitSig()})
+				lastBlockMeta.BlockID, []types.CommitSig{vote.CommitSig()}, lastBlockMeta.PartSetHeader)
 		}
 
 		thisBlock := makeBlock(blockHeight, state, lastCommit)
 
 		thisParts := thisBlock.MakePartSet(types.BlockPartSizeBytes)
-		blockID := types.BlockID{Hash: thisBlock.Hash(), PartSetHeader: thisParts.Header()}
+		blockID := types.BlockID{Hash: thisBlock.Hash()}
 
-		state, _, err = blockExec.ApplyBlock(state, blockID, thisBlock)
+		state, _, err = blockExec.ApplyBlock(state, blockID, thisParts.Header(), thisBlock)
 		if err != nil {
 			panic(fmt.Errorf("error apply block: %w", err))
 		}
 
-		blockStore.SaveBlock(thisBlock, thisParts, lastCommit)
+		err := blockStore.SaveBlock(context.TODO(), thisBlock, thisParts, lastCommit)
+		if err != nil {
+			panic(err)
+		}
 	}
 
 	bcReactor := NewBlockchainReactor(state.Copy(), blockExec, blockStore, fastSync)
@@ -183,7 +190,10 @@ func TestNoBlockResponse(t *testing.T) {
 	assert.Equal(t, maxBlockHeight, reactorPairs[0].reactor.store.Height())
 
 	for _, tt := range tests {
-		block := reactorPairs[1].reactor.store.LoadBlock(tt.height)
+		block, err := reactorPairs[1].reactor.store.LoadBlock(context.TODO(), tt.height)
+		if err != nil {
+			panic(err)
+		}
 		if tt.existent {
 			assert.True(t, block != nil)
 		} else {

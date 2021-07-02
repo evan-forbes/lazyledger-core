@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/gogo/protobuf/proto"
+	format "github.com/ipfs/go-ipld-format"
+	mdutils "github.com/ipfs/go-merkledag/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -70,6 +72,7 @@ func startNewStateAndWaitForBlock(t *testing.T, consensusReplayConfig *cfg.Confi
 	logger := log.TestingLogger()
 	state, _ := stateStore.LoadFromDBOrGenesisFile(consensusReplayConfig.GenesisFile())
 	privValidator := loadPrivValidator(consensusReplayConfig)
+
 	cs := newStateWithConfigAndBlockStore(
 		consensusReplayConfig,
 		state,
@@ -100,7 +103,7 @@ func startNewStateAndWaitForBlock(t *testing.T, consensusReplayConfig *cfg.Confi
 	case <-newBlockSub.Out():
 	case <-newBlockSub.Cancelled():
 		t.Fatal("newBlockSub was cancelled")
-	case <-time.After(120 * time.Second):
+	case <-time.After(4 * time.Minute):
 		t.Fatal("Timed out waiting for new block (see trace above)")
 	}
 }
@@ -150,7 +153,6 @@ func crashWALandCheckLiveness(t *testing.T, consensusReplayConfig *cfg.Config,
 	initFn func(dbm.DB, *State, context.Context), heightToStop int64) {
 	walPanicked := make(chan error)
 	crashingWal := &crashingWAL{panicCh: walPanicked, heightToStop: heightToStop}
-
 	i := 1
 LOOP:
 	for {
@@ -160,6 +162,7 @@ LOOP:
 		logger := log.NewNopLogger()
 		blockDB := memdb.NewDB()
 		stateDB := blockDB
+
 		stateStore := sm.NewStore(stateDB)
 		state, err := sm.MakeGenesisStateFromFile(consensusReplayConfig.GenesisFile())
 		require.NoError(t, err)
@@ -329,7 +332,8 @@ func TestSimulateValidatorsChange(t *testing.T) {
 		nPeers,
 		"replay_test",
 		newMockTickerFunc(true),
-		newPersistentKVStoreWithPath)
+		newPersistentKVStoreWithPath,
+	)
 	sim.Config = config
 	sim.GenesisState, _ = sm.MakeGenesisState(genDoc)
 	sim.CleanupFunc = cleanup
@@ -366,9 +370,9 @@ func TestSimulateValidatorsChange(t *testing.T) {
 	assert.Nil(t, err)
 	propBlock, _ := css[0].createProposalBlock() // changeProposer(t, cs1, vs2)
 	propBlockParts := propBlock.MakePartSet(partSize)
-	blockID := types.BlockID{Hash: propBlock.Hash(), PartSetHeader: propBlockParts.Header()}
+	blockID := types.BlockID{Hash: propBlock.Hash()}
 
-	proposal := types.NewProposal(vss[1].Height, round, -1, blockID, &propBlock.DataAvailabilityHeader)
+	proposal := types.NewProposal(vss[1].Height, round, -1, blockID, &propBlock.DataAvailabilityHeader, propBlockParts.Header())
 	p, err := proposal.ToProto()
 	require.NoError(t, err)
 	if err := vss[1].SignProposal(config.ChainID(), p); err != nil {
@@ -397,9 +401,9 @@ func TestSimulateValidatorsChange(t *testing.T) {
 	assert.Nil(t, err)
 	propBlock, _ = css[0].createProposalBlock() // changeProposer(t, cs1, vs2)
 	propBlockParts = propBlock.MakePartSet(partSize)
-	blockID = types.BlockID{Hash: propBlock.Hash(), PartSetHeader: propBlockParts.Header()}
+	blockID = types.BlockID{Hash: propBlock.Hash()}
 
-	proposal = types.NewProposal(vss[2].Height, round, -1, blockID, &propBlock.DataAvailabilityHeader)
+	proposal = types.NewProposal(vss[2].Height, round, -1, blockID, &propBlock.DataAvailabilityHeader, propBlockParts.Header())
 	p, err = proposal.ToProto()
 	require.NoError(t, err)
 	if err := vss[2].SignProposal(config.ChainID(), p); err != nil {
@@ -435,7 +439,8 @@ func TestSimulateValidatorsChange(t *testing.T) {
 	assert.Nil(t, err)
 	propBlock, _ = css[0].createProposalBlock() // changeProposer(t, cs1, vs2)
 	propBlockParts = propBlock.MakePartSet(partSize)
-	blockID = types.BlockID{Hash: propBlock.Hash(), PartSetHeader: propBlockParts.Header()}
+	blockID = types.BlockID{Hash: propBlock.Hash()}
+	psh := propBlockParts.Header()
 	newVss := make([]*validatorStub, nVals+1)
 	copy(newVss, vss[:nVals+1])
 	sort.Sort(ValidatorStubsByPower(newVss))
@@ -457,7 +462,7 @@ func TestSimulateValidatorsChange(t *testing.T) {
 
 	selfIndex := valIndexFn(0)
 
-	proposal = types.NewProposal(vss[3].Height, round, -1, blockID, &propBlock.DataAvailabilityHeader)
+	proposal = types.NewProposal(vss[3].Height, round, -1, blockID, &propBlock.DataAvailabilityHeader, psh)
 	p, err = proposal.ToProto()
 	require.NoError(t, err)
 	if err := vss[3].SignProposal(config.ChainID(), p); err != nil {
@@ -511,13 +516,14 @@ func TestSimulateValidatorsChange(t *testing.T) {
 	assert.Nil(t, err)
 	propBlock, _ = css[0].createProposalBlock() // changeProposer(t, cs1, vs2)
 	propBlockParts = propBlock.MakePartSet(partSize)
-	blockID = types.BlockID{Hash: propBlock.Hash(), PartSetHeader: propBlockParts.Header()}
+	blockID = types.BlockID{Hash: propBlock.Hash()}
+	psh = propBlockParts.Header()
 	newVss = make([]*validatorStub, nVals+3)
 	copy(newVss, vss[:nVals+3])
 	sort.Sort(ValidatorStubsByPower(newVss))
 
 	selfIndex = valIndexFn(0)
-	proposal = types.NewProposal(vss[1].Height, round, -1, blockID, &propBlock.DataAvailabilityHeader)
+	proposal = types.NewProposal(vss[1].Height, round, -1, blockID, &propBlock.DataAvailabilityHeader, psh)
 	p, err = proposal.ToProto()
 	require.NoError(t, err)
 	if err := vss[1].SignProposal(config.ChainID(), p); err != nil {
@@ -542,7 +548,9 @@ func TestSimulateValidatorsChange(t *testing.T) {
 	sim.Chain = make([]*types.Block, 0)
 	sim.Commits = make([]*types.Commit, 0)
 	for i := 1; i <= numBlocks; i++ {
-		sim.Chain = append(sim.Chain, css[0].blockStore.LoadBlock(int64(i)))
+		blck, err := css[0].blockStore.LoadBlock(context.TODO(), int64(i))
+		require.NoError(t, err)
+		sim.Chain = append(sim.Chain, blck)
 		sim.Commits = append(sim.Commits, css[0].blockStore.LoadBlockCommit(int64(i)))
 	}
 }
@@ -675,7 +683,7 @@ func testHandshakeReplay(t *testing.T, config *cfg.Config, nBlocks int, mode uin
 	} else { // test single node
 		testConfig := ResetConfig(fmt.Sprintf("%s_%v_s", t.Name(), mode))
 		defer func() { _ = os.RemoveAll(testConfig.RootDir) }()
-		walBody, err := WALWithNBlocks(t, numBlocks)
+		walBody, err := walWithNBlocks(t, numBlocks)
 		require.NoError(t, err)
 		walFile := tempWALWithData(walBody)
 		config.Consensus.SetWalFile(walFile)
@@ -785,8 +793,9 @@ func applyBlock(stateStore sm.Store, st sm.State, blk *types.Block, proxyApp pro
 	testPartSize := types.BlockPartSizeBytes
 	blockExec := sm.NewBlockExecutor(stateStore, log.TestingLogger(), proxyApp.Consensus(), mempool, evpool)
 
-	blkID := types.BlockID{Hash: blk.Hash(), PartSetHeader: blk.MakePartSet(testPartSize).Header()}
-	newState, _, err := blockExec.ApplyBlock(st, blkID, blk)
+	blkID := types.BlockID{Hash: blk.Hash()}
+	psh := blk.MakePartSet(testPartSize).Header()
+	newState, _, err := blockExec.ApplyBlock(st, blkID, psh, blk)
 	if err != nil {
 		panic(err)
 	}
@@ -983,17 +992,18 @@ func makeBlocks(n int, state *sm.State, privVal types.PrivValidator) []*types.Bl
 func makeBlock(state sm.State, lastBlock *types.Block, lastBlockMeta *types.BlockMeta,
 	privVal types.PrivValidator, height int64) (*types.Block, *types.PartSet) {
 
-	lastCommit := types.NewCommit(height-1, 0, types.BlockID{}, nil)
+	lastCommit := types.NewCommit(height-1, 0, types.BlockID{}, nil, types.PartSetHeader{})
 	if height > 1 {
 		vote, _ := types.MakeVote(
 			lastBlock.Header.Height,
 			lastBlockMeta.BlockID,
+			lastBlockMeta.PartSetHeader,
 			state.Validators,
 			privVal,
 			lastBlock.Header.ChainID,
 			time.Now())
 		lastCommit = types.NewCommit(vote.Height, vote.Round,
-			lastBlockMeta.BlockID, []types.CommitSig{vote.CommitSig()})
+			lastBlockMeta.BlockID, []types.CommitSig{vote.CommitSig()}, lastBlockMeta.PartSetHeader)
 	}
 
 	return state.MakeBlock(
@@ -1107,7 +1117,7 @@ func makeBlockchainFromWAL(wal WAL) ([]*types.Block, []*types.Commit, error) {
 		case *types.Vote:
 			if p.Type == tmproto.PrecommitType {
 				thisBlockCommit = types.NewCommit(p.Height, p.Round,
-					p.BlockID, []types.CommitSig{p.CommitSig()})
+					p.BlockID, []types.CommitSig{p.CommitSig()}, p.PartSetHeader)
 			}
 		}
 	}
@@ -1143,7 +1153,7 @@ func readPieceFromWAL(msg *TimedWALMessage) interface{} {
 	case msgInfo:
 		switch msg := m.Msg.(type) {
 		case *ProposalMessage:
-			return &msg.Proposal.BlockID.PartSetHeader
+			return &msg.Proposal.PartSetHeader
 		case *BlockPartMessage:
 			return msg.Part
 		case *VoteMessage:
@@ -1176,35 +1186,45 @@ func stateAndStore(
 // mock block store
 
 type mockBlockStore struct {
-	config  *cfg.Config
-	params  tmproto.ConsensusParams
-	chain   []*types.Block
-	commits []*types.Commit
-	base    int64
+	config     *cfg.Config
+	params     tmproto.ConsensusParams
+	chain      []*types.Block
+	commits    []*types.Commit
+	base       int64
+	ipfsDagAPI format.DAGService
 }
 
 // TODO: NewBlockStore(db.NewMemDB) ...
 func newMockBlockStore(config *cfg.Config, params tmproto.ConsensusParams) *mockBlockStore {
-	return &mockBlockStore{config, params, nil, nil, 0}
+	return &mockBlockStore{config, params, nil, nil, 0, mdutils.Mock()}
 }
 
-func (bs *mockBlockStore) Height() int64                       { return int64(len(bs.chain)) }
-func (bs *mockBlockStore) Base() int64                         { return bs.base }
-func (bs *mockBlockStore) Size() int64                         { return bs.Height() - bs.Base() + 1 }
-func (bs *mockBlockStore) LoadBaseMeta() *types.BlockMeta      { return bs.LoadBlockMeta(bs.base) }
-func (bs *mockBlockStore) LoadBlock(height int64) *types.Block { return bs.chain[height-1] }
-func (bs *mockBlockStore) LoadBlockByHash(hash []byte) *types.Block {
-	return bs.chain[int64(len(bs.chain))-1]
+func (bs *mockBlockStore) Height() int64                  { return int64(len(bs.chain)) }
+func (bs *mockBlockStore) Base() int64                    { return bs.base }
+func (bs *mockBlockStore) Size() int64                    { return bs.Height() - bs.Base() + 1 }
+func (bs *mockBlockStore) LoadBaseMeta() *types.BlockMeta { return bs.LoadBlockMeta(bs.base) }
+func (bs *mockBlockStore) LoadBlock(ctx context.Context, height int64) (*types.Block, error) {
+	return bs.chain[height-1], nil
+}
+func (bs *mockBlockStore) LoadBlockByHash(ctx context.Context, hash []byte) (*types.Block, error) {
+	return bs.chain[int64(len(bs.chain))-1], nil
 }
 func (bs *mockBlockStore) LoadBlockMeta(height int64) *types.BlockMeta {
 	block := bs.chain[height-1]
 	return &types.BlockMeta{
-		BlockID: types.BlockID{Hash: block.Hash(), PartSetHeader: block.MakePartSet(types.BlockPartSizeBytes).Header()},
-		Header:  block.Header,
+		BlockID:       types.BlockID{Hash: block.Hash()},
+		PartSetHeader: block.MakePartSet(types.BlockPartSizeBytes).Header(),
+		Header:        block.Header,
 	}
 }
 func (bs *mockBlockStore) LoadBlockPart(height int64, index int) *types.Part { return nil }
-func (bs *mockBlockStore) SaveBlock(block *types.Block, blockParts *types.PartSet, seenCommit *types.Commit) {
+func (bs *mockBlockStore) SaveBlock(
+	ctx context.Context,
+	block *types.Block,
+	blockParts *types.PartSet,
+	seenCommit *types.Commit,
+) error {
+	return nil
 }
 func (bs *mockBlockStore) LoadBlockCommit(height int64) *types.Commit {
 	return bs.commits[height-1]

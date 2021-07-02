@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/gogo/protobuf/proto"
-	ipfsapi "github.com/ipfs/interface-go-ipfs-core"
+	format "github.com/ipfs/go-ipld-format"
+	"github.com/libp2p/go-libp2p-core/routing"
+
 	cfg "github.com/lazyledger/lazyledger-core/config"
 	cstypes "github.com/lazyledger/lazyledger-core/consensus/types"
 	"github.com/lazyledger/lazyledger-core/crypto"
@@ -25,6 +27,7 @@ import (
 	"github.com/lazyledger/lazyledger-core/libs/service"
 	tmsync "github.com/lazyledger/lazyledger-core/libs/sync"
 	"github.com/lazyledger/lazyledger-core/p2p"
+	"github.com/lazyledger/lazyledger-core/p2p/ipld"
 	tmproto "github.com/lazyledger/lazyledger-core/proto/tendermint/types"
 	sm "github.com/lazyledger/lazyledger-core/state"
 	"github.com/lazyledger/lazyledger-core/types"
@@ -93,7 +96,8 @@ type State struct {
 	// store blocks and commits
 	blockStore sm.BlockStore
 
-	IpfsAPI ipfsapi.CoreAPI
+	dag    format.DAGService
+	croute routing.ContentRouting
 
 	// create and execute blocks
 	blockExec *sm.BlockExecutor
@@ -150,6 +154,10 @@ type State struct {
 
 	// for reporting metrics
 	metrics *Metrics
+
+	// context of the recent proposed block
+	proposalCtx    context.Context
+	proposalCancel context.CancelFunc
 }
 
 // StateOption sets an optional parameter on the State.
@@ -162,6 +170,8 @@ func NewState(
 	blockExec *sm.BlockExecutor,
 	blockStore sm.BlockStore,
 	txNotifier txNotifier,
+	dag format.DAGService,
+	croute routing.ContentRouting,
 	evpool evidencePool,
 	options ...StateOption,
 ) *State {
@@ -169,6 +179,8 @@ func NewState(
 		config:           config,
 		blockExec:        blockExec,
 		blockStore:       blockStore,
+		dag:              dag,
+		croute:           croute,
 		txNotifier:       txNotifier,
 		peerMsgQueue:     make(chan msgInfo, msgQueueSize),
 		internalMsgQueue: make(chan msgInfo, msgQueueSize),
@@ -1086,8 +1098,8 @@ func (cs *State) defaultDecideProposal(height int64, round int32) {
 	}
 
 	// Make proposal
-	propBlockID := types.BlockID{Hash: block.Hash(), PartSetHeader: blockParts.Header()}
-	proposal := types.NewProposal(height, round, cs.ValidRound, propBlockID, &block.DataAvailabilityHeader)
+	propBlockID := types.BlockID{Hash: block.Hash()}
+	proposal := types.NewProposal(height, round, cs.ValidRound, propBlockID, &block.DataAvailabilityHeader, blockParts.Header())
 	p, err := proposal.ToProto()
 	if err != nil {
 		cs.Logger.Error(fmt.Sprintf("can't serialize proposal: %s", err.Error()))
@@ -1109,18 +1121,40 @@ func (cs *State) defaultDecideProposal(height int64, round int32) {
 		cs.Logger.Error("enterPropose: Error signing proposal", "height", height, "round", round, "err", err)
 	}
 
-	// post data to ipfs
-	// TODO(evan): don't hard code context and timeout
-	if cs.IpfsAPI != nil {
-		// longer timeouts result in block proposers failing to propose blocks in time.
-		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*1500)
-		defer cancel()
-		// TODO: post data to IPFS in a goroutine
-		err := block.PutBlock(ctx, cs.IpfsAPI.Dag())
-		if err != nil {
-			cs.Logger.Error(fmt.Sprintf("failure to post block data to IPFS: %s", err.Error()))
-		}
+	// cancel ctx for previous proposal block to ensure block putting/providing does not queues up
+	if cs.proposalCancel != nil {
+		// FIXME(ismail): below commented out cancel tries to prevent block putting
+		// and providing no to queue up endlessly.
+		// But in a real network proposers should have enough time in between.
+		// And even if not, queuing up to a problematic extent will take a lot of time:
+		// Even on the Cosmos Hub the largest validator only proposes every 15 blocks.
+		// With an average block time of roughly 7.5 seconds this means almost
+		// two minutes between two different proposals by the same validator.
+		// For other validators much more time passes in between.
+		// In our case block interval times will likely be larger.
+		// And independent of this DHT providing will be made faster:
+		//  - https://github.com/lazyledger/lazyledger-core/issues/395
+		//
+		// Furthermore, and independent of all of the above,
+		// the provide timeout could still be larger than just the time between
+		// two consecutive proposals.
+		//
+		cs.proposalCancel()
 	}
+	cs.proposalCtx, cs.proposalCancel = context.WithCancel(context.TODO())
+	go func(ctx context.Context) {
+		cs.Logger.Info("Putting Block to IPFS", "height", block.Height)
+		err = ipld.PutBlock(ctx, cs.dag, block, cs.croute, cs.Logger)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				cs.Logger.Error("Putting Block didn't finish in time and was terminated", "height", block.Height)
+				return
+			}
+			cs.Logger.Error("Failed to put Block to IPFS", "err", err, "height", block.Height)
+			return
+		}
+		cs.Logger.Info("Finished putting block to IPFS", "height", block.Height)
+	}(cs.proposalCtx)
 }
 
 // Returns true if the proposal block is complete &&
@@ -1156,7 +1190,7 @@ func (cs *State) createProposalBlock() (block *types.Block, blockParts *types.Pa
 	case cs.Height == cs.state.InitialHeight:
 		// We're creating a proposal for the first block.
 		// The commit is empty, but not nil.
-		commit = types.NewCommit(0, 0, types.BlockID{}, nil)
+		commit = types.NewCommit(0, 0, types.BlockID{}, nil, types.PartSetHeader{})
 	case cs.LastCommit.HasTwoThirdsMajority():
 		// Make the commit from LastCommit
 		commit = cs.LastCommit.MakeCommit()
@@ -1298,7 +1332,7 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 	}()
 
 	// check for a polka
-	blockID, ok := cs.Votes.Prevotes(round).TwoThirdsMajority()
+	blockID, partSetHeader, ok := cs.Votes.Prevotes(round).TwoThirdsMajority()
 
 	// If we don't have a polka, we must precommit nil.
 	if !ok {
@@ -1317,7 +1351,7 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 	}
 
 	// the latest POLRound should be this round.
-	polRound, _ := cs.Votes.POLInfo()
+	polRound, _, _ := cs.Votes.POLInfo()
 	if polRound < round {
 		panic(fmt.Sprintf("This POLRound should be %v but got %v", round, polRound))
 	}
@@ -1348,7 +1382,7 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 		if err := cs.eventBus.PublishEventRelock(cs.RoundStateEvent()); err != nil {
 			cs.Logger.Error("Error publishing event relock", "err", err)
 		}
-		cs.signAddVote(tmproto.PrecommitType, blockID.Hash, blockID.PartSetHeader)
+		cs.signAddVote(tmproto.PrecommitType, blockID.Hash, partSetHeader)
 		return
 	}
 
@@ -1365,7 +1399,7 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 		if err := cs.eventBus.PublishEventLock(cs.RoundStateEvent()); err != nil {
 			cs.Logger.Error("Error publishing event lock", "err", err)
 		}
-		cs.signAddVote(tmproto.PrecommitType, blockID.Hash, blockID.PartSetHeader)
+		cs.signAddVote(tmproto.PrecommitType, blockID.Hash, partSetHeader)
 		return
 	}
 
@@ -1376,9 +1410,9 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 	cs.LockedRound = -1
 	cs.LockedBlock = nil
 	cs.LockedBlockParts = nil
-	if !cs.ProposalBlockParts.HasHeader(blockID.PartSetHeader) {
+	if !cs.ProposalBlockParts.HasHeader(partSetHeader) {
 		cs.ProposalBlock = nil
-		cs.ProposalBlockParts = types.NewPartSetFromHeader(blockID.PartSetHeader)
+		cs.ProposalBlockParts = types.NewPartSetFromHeader(partSetHeader)
 	}
 	if err := cs.eventBus.PublishEventUnlock(cs.RoundStateEvent()); err != nil {
 		cs.Logger.Error("Error publishing event unlock", "err", err)
@@ -1441,7 +1475,7 @@ func (cs *State) enterCommit(height int64, commitRound int32) {
 		cs.tryFinalizeCommit(height)
 	}()
 
-	blockID, ok := cs.Votes.Precommits(commitRound).TwoThirdsMajority()
+	blockID, partSetHeader, ok := cs.Votes.Precommits(commitRound).TwoThirdsMajority()
 	if !ok {
 		panic("RunActionCommit() expects +2/3 precommits")
 	}
@@ -1457,7 +1491,7 @@ func (cs *State) enterCommit(height int64, commitRound int32) {
 
 	// If we don't have the block being committed, set up to get it.
 	if !cs.ProposalBlock.HashesTo(blockID.Hash) {
-		if !cs.ProposalBlockParts.HasHeader(blockID.PartSetHeader) {
+		if !cs.ProposalBlockParts.HasHeader(partSetHeader) {
 			logger.Info(
 				"Commit is for a block we don't know about. Set ProposalBlock=nil",
 				"proposal",
@@ -1467,7 +1501,7 @@ func (cs *State) enterCommit(height int64, commitRound int32) {
 			// We're getting the wrong block.
 			// Set up ProposalBlockParts and keep waiting.
 			cs.ProposalBlock = nil
-			cs.ProposalBlockParts = types.NewPartSetFromHeader(blockID.PartSetHeader)
+			cs.ProposalBlockParts = types.NewPartSetFromHeader(partSetHeader)
 			if err := cs.eventBus.PublishEventValidBlock(cs.RoundStateEvent()); err != nil {
 				cs.Logger.Error("Error publishing valid block", "err", err)
 			}
@@ -1487,7 +1521,7 @@ func (cs *State) tryFinalizeCommit(height int64) {
 		panic(fmt.Sprintf("tryFinalizeCommit() cs.Height: %v vs height: %v", cs.Height, height))
 	}
 
-	blockID, ok := cs.Votes.Precommits(cs.CommitRound).TwoThirdsMajority()
+	blockID, _, ok := cs.Votes.Precommits(cs.CommitRound).TwoThirdsMajority()
 	if !ok || len(blockID.Hash) == 0 {
 		logger.Error("Attempt to finalize failed. There was no +2/3 majority, or +2/3 was for <nil>.")
 		return
@@ -1520,13 +1554,13 @@ func (cs *State) finalizeCommit(height int64) {
 		return
 	}
 
-	blockID, ok := cs.Votes.Precommits(cs.CommitRound).TwoThirdsMajority()
+	blockID, partSetHeader, ok := cs.Votes.Precommits(cs.CommitRound).TwoThirdsMajority()
 	block, blockParts := cs.ProposalBlock, cs.ProposalBlockParts
 
 	if !ok {
 		panic("Cannot finalizeCommit, commit does not have two thirds majority")
 	}
-	if !blockParts.HasHeader(blockID.PartSetHeader) {
+	if !blockParts.HasHeader(partSetHeader) {
 		panic("Expected ProposalBlockParts header to be commit header")
 	}
 	if !block.HashesTo(blockID.Hash) {
@@ -1551,7 +1585,10 @@ func (cs *State) finalizeCommit(height int64) {
 		// but may differ from the LastCommit included in the next block
 		precommits := cs.Votes.Precommits(cs.CommitRound)
 		seenCommit := precommits.MakeCommit()
-		cs.blockStore.SaveBlock(block, blockParts, seenCommit)
+		err := cs.blockStore.SaveBlock(context.TODO(), block, blockParts, seenCommit)
+		if err != nil {
+			panic(err)
+		}
 	} else {
 		// Happens during replay if we already saved the block but didn't commit
 		cs.Logger.Info("Calling finalizeCommit on already stored block", "height", block.Height)
@@ -1589,7 +1626,8 @@ func (cs *State) finalizeCommit(height int64) {
 	var retainHeight int64
 	stateCopy, retainHeight, err = cs.blockExec.ApplyBlock(
 		stateCopy,
-		types.BlockID{Hash: block.Hash(), PartSetHeader: blockParts.Header()},
+		types.BlockID{Hash: block.Hash()},
+		blockParts.Header(),
 		block)
 	if err != nil {
 		cs.Logger.Error("Error on ApplyBlock", "err", err)
@@ -1773,7 +1811,7 @@ func (cs *State) defaultSetProposal(proposal *types.Proposal) error {
 	// This happens if we're already in cstypes.RoundStepCommit or if there is a valid block in the current round.
 	// TODO: We can check if Proposal is for a different block as this is a sign of misbehavior!
 	if cs.ProposalBlockParts == nil {
-		cs.ProposalBlockParts = types.NewPartSetFromHeader(proposal.BlockID.PartSetHeader)
+		cs.ProposalBlockParts = types.NewPartSetFromHeader(proposal.PartSetHeader)
 	}
 	cs.Logger.Info("Received proposal", "proposal", proposal)
 	return nil
@@ -1835,7 +1873,7 @@ func (cs *State) addProposalBlockPart(msg *BlockPartMessage, peerID p2p.ID) (add
 
 		// Update Valid* if we can.
 		prevotes := cs.Votes.Prevotes(cs.Round)
-		blockID, hasTwoThirds := prevotes.TwoThirdsMajority()
+		blockID, _, hasTwoThirds := prevotes.TwoThirdsMajority()
 		if hasTwoThirds && !blockID.IsZero() && (cs.ValidRound < cs.Round) {
 			if cs.ProposalBlock.HashesTo(blockID.Hash) {
 				cs.Logger.Info("Updating valid block to new proposal block",
@@ -1992,7 +2030,7 @@ func (cs *State) addVote(
 		cs.Logger.Info("Added to prevote", "vote", vote, "prevotes", prevotes.StringShort())
 
 		// If +2/3 prevotes for a block or nil for *any* round:
-		if blockID, ok := prevotes.TwoThirdsMajority(); ok {
+		if blockID, partSetHeader, ok := prevotes.TwoThirdsMajority(); ok {
 
 			// There was a polka!
 			// If we're locked but this is a recent polka, unlock.
@@ -2031,8 +2069,8 @@ func (cs *State) addVote(
 					// We're getting the wrong block.
 					cs.ProposalBlock = nil
 				}
-				if !cs.ProposalBlockParts.HasHeader(blockID.PartSetHeader) {
-					cs.ProposalBlockParts = types.NewPartSetFromHeader(blockID.PartSetHeader)
+				if !cs.ProposalBlockParts.HasHeader(partSetHeader) {
+					cs.ProposalBlockParts = types.NewPartSetFromHeader(partSetHeader)
 				}
 				cs.evsw.FireEvent(types.EventValidBlock, &cs.RoundState)
 				if err := cs.eventBus.PublishEventValidBlock(cs.RoundStateEvent()); err != nil {
@@ -2047,7 +2085,7 @@ func (cs *State) addVote(
 			// Round-skip if there is any 2/3+ of votes ahead of us
 			cs.enterNewRound(height, vote.Round)
 		case cs.Round == vote.Round && cstypes.RoundStepPrevote <= cs.Step: // current round
-			blockID, ok := prevotes.TwoThirdsMajority()
+			blockID, _, ok := prevotes.TwoThirdsMajority()
 			if ok && (cs.isProposalComplete() || len(blockID.Hash) == 0) {
 				cs.enterPrecommit(height, vote.Round)
 			} else if prevotes.HasTwoThirdsAny() {
@@ -2064,7 +2102,7 @@ func (cs *State) addVote(
 		precommits := cs.Votes.Precommits(vote.Round)
 		cs.Logger.Info("Added to precommit", "vote", vote, "precommits", precommits.StringShort())
 
-		blockID, ok := precommits.TwoThirdsMajority()
+		blockID, _, ok := precommits.TwoThirdsMajority()
 		if ok {
 			// Executed as TwoThirdsMajority could be from a higher round
 			cs.enterNewRound(height, vote.Round)
@@ -2114,7 +2152,8 @@ func (cs *State) signVote(
 		Round:            cs.Round,
 		Timestamp:        cs.voteTime(),
 		Type:             msgType,
-		BlockID:          types.BlockID{Hash: hash, PartSetHeader: header},
+		BlockID:          types.BlockID{Hash: hash},
+		PartSetHeader:    header,
 	}
 	v := vote.ToProto()
 	err := cs.privValidator.SignVote(cs.state.ChainID, v)

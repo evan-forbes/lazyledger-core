@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	mdutils "github.com/ipfs/go-merkledag/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -22,6 +23,7 @@ import (
 	cstypes "github.com/lazyledger/lazyledger-core/consensus/types"
 	cryptoenc "github.com/lazyledger/lazyledger-core/crypto/encoding"
 	"github.com/lazyledger/lazyledger-core/crypto/tmhash"
+	"github.com/lazyledger/lazyledger-core/ipfs"
 	"github.com/lazyledger/lazyledger-core/libs/bits"
 	"github.com/lazyledger/lazyledger-core/libs/bytes"
 	"github.com/lazyledger/lazyledger-core/libs/db/memdb"
@@ -109,7 +111,12 @@ func stopConsensusNet(logger log.Logger, reactors []*Reactor, eventBuses []*type
 // Ensure a testnet makes blocks
 func TestReactorBasic(t *testing.T) {
 	N := 4
-	css, cleanup := randConsensusNet(N, "consensus_reactor_test", newMockTickerFunc(true), newCounter)
+	css, cleanup := randConsensusNet(
+		N,
+		"consensus_reactor_test",
+		newMockTickerFunc(true),
+		newCounter,
+	)
 	defer cleanup()
 	reactors, blocksSubs, eventBuses := startConsensusNet(t, css, N)
 	defer stopConsensusNet(log.TestingLogger(), reactors, eventBuses)
@@ -148,9 +155,8 @@ func TestReactorWithEvidence(t *testing.T) {
 		// duplicate code from:
 		// css[i] = newStateWithConfig(thisConfig, state, privVals[i], app)
 
-		blockDB := memdb.NewDB()
-		blockStore := store.NewBlockStore(blockDB)
-
+		dag := mdutils.Mock()
+		blockStore := store.MockBlockStore(nil)
 		// one for mempool, one for consensus
 		mtx := new(tmsync.Mutex)
 		proxyAppConnMem := abcicli.NewLocalClient(mtx, app)
@@ -177,7 +183,8 @@ func TestReactorWithEvidence(t *testing.T) {
 
 		// Make State
 		blockExec := sm.NewBlockExecutor(stateStore, log.TestingLogger(), proxyAppConnCon, mempool, evpool)
-		cs := NewState(thisConfig.Consensus, state, blockExec, blockStore, mempool, evpool2)
+		cs := NewState(thisConfig.Consensus, state, blockExec, blockStore,
+			mempool, dag, ipfs.MockRouting(), evpool2)
 		cs.SetLogger(log.TestingLogger().With("module", "consensus"))
 		cs.SetPrivValidator(pv)
 
@@ -211,7 +218,11 @@ func TestReactorWithEvidence(t *testing.T) {
 // Ensure a testnet makes blocks when there are txs
 func TestReactorCreatesBlockWhenEmptyBlocksFalse(t *testing.T) {
 	N := 4
-	css, cleanup := randConsensusNet(N, "consensus_reactor_test", newMockTickerFunc(true), newCounter,
+	css, cleanup := randConsensusNet(
+		N,
+		"consensus_reactor_test",
+		newMockTickerFunc(true),
+		newCounter,
 		func(c *cfg.Config) {
 			c.Consensus.CreateEmptyBlocks = false
 		})
@@ -232,7 +243,12 @@ func TestReactorCreatesBlockWhenEmptyBlocksFalse(t *testing.T) {
 
 func TestReactorReceiveDoesNotPanicIfAddPeerHasntBeenCalledYet(t *testing.T) {
 	N := 1
-	css, cleanup := randConsensusNet(N, "consensus_reactor_test", newMockTickerFunc(true), newCounter)
+	css, cleanup := randConsensusNet(
+		N,
+		"consensus_reactor_test",
+		newMockTickerFunc(true),
+		newCounter,
+	)
 	defer cleanup()
 	reactors, _, eventBuses := startConsensusNet(t, css, N)
 	defer stopConsensusNet(log.TestingLogger(), reactors, eventBuses)
@@ -255,7 +271,12 @@ func TestReactorReceiveDoesNotPanicIfAddPeerHasntBeenCalledYet(t *testing.T) {
 
 func TestReactorReceivePanicsIfInitPeerHasntBeenCalledYet(t *testing.T) {
 	N := 1
-	css, cleanup := randConsensusNet(N, "consensus_reactor_test", newMockTickerFunc(true), newCounter)
+	css, cleanup := randConsensusNet(
+		N,
+		"consensus_reactor_test",
+		newMockTickerFunc(true),
+		newCounter,
+	)
 	defer cleanup()
 	reactors, _, eventBuses := startConsensusNet(t, css, N)
 	defer stopConsensusNet(log.TestingLogger(), reactors, eventBuses)
@@ -278,7 +299,12 @@ func TestReactorReceivePanicsIfInitPeerHasntBeenCalledYet(t *testing.T) {
 // Test we record stats about votes and block parts from other peers.
 func TestReactorRecordsVotesAndBlockParts(t *testing.T) {
 	N := 4
-	css, cleanup := randConsensusNet(N, "consensus_reactor_test", newMockTickerFunc(true), newCounter)
+	css, cleanup := randConsensusNet(
+		N,
+		"consensus_reactor_test",
+		newMockTickerFunc(true),
+		newCounter,
+	)
 	defer cleanup()
 	reactors, blocksSubs, eventBuses := startConsensusNet(t, css, N)
 	defer stopConsensusNet(log.TestingLogger(), reactors, eventBuses)
@@ -307,7 +333,8 @@ func TestReactorVotingPowerChange(t *testing.T) {
 		nVals,
 		"consensus_voting_power_changes_test",
 		newMockTickerFunc(true),
-		newPersistentKVStore)
+		newPersistentKVStore,
+	)
 	defer cleanup()
 	reactors, blocksSubs, eventBuses := startConsensusNet(t, css, nVals)
 	defer stopConsensusNet(logger, reactors, eventBuses)
@@ -388,7 +415,8 @@ func TestReactorValidatorSetChanges(t *testing.T) {
 		nPeers,
 		"consensus_val_set_changes_test",
 		newMockTickerFunc(true),
-		newPersistentKVStoreWithPath)
+		newPersistentKVStoreWithPath,
+	)
 
 	defer cleanup()
 	logger := log.TestingLogger()
@@ -499,7 +527,12 @@ func TestReactorValidatorSetChanges(t *testing.T) {
 // Check we can make blocks with skip_timeout_commit=false
 func TestReactorWithTimeoutCommit(t *testing.T) {
 	N := 4
-	css, cleanup := randConsensusNet(N, "consensus_reactor_with_timeout_commit_test", newMockTickerFunc(false), newCounter)
+	css, cleanup := randConsensusNet(
+		N,
+		"consensus_reactor_with_timeout_commit_test",
+		newMockTickerFunc(false),
+		newCounter,
+	)
 	defer cleanup()
 	// override default SkipTimeoutCommit == true for tests
 	for i := 0; i < N; i++ {
@@ -638,7 +671,7 @@ func timeoutWaitGroup(t *testing.T, n int, f func(int), css []*State) {
 
 	// we're running many nodes in-process, possibly in in a virtual machine,
 	// and spewing debug messages - making a block could take a while,
-	timeout := time.Second * 120
+	timeout := time.Minute * 8
 
 	select {
 	case <-done:
@@ -893,12 +926,13 @@ func TestVoteSetMaj23MessageValidateBasic(t *testing.T) {
 	)
 
 	validBlockID := types.BlockID{}
+	validPSH := types.PartSetHeader{}
 	invalidBlockID := types.BlockID{
 		Hash: bytes.HexBytes{},
-		PartSetHeader: types.PartSetHeader{
-			Total: 1,
-			Hash:  []byte{0},
-		},
+	}
+	invalidPSH := types.PartSetHeader{
+		Total: 1,
+		Hash:  []byte{0},
 	}
 
 	testCases := []struct { // nolint: maligned
@@ -908,12 +942,13 @@ func TestVoteSetMaj23MessageValidateBasic(t *testing.T) {
 		testName       string
 		messageType    tmproto.SignedMsgType
 		messageBlockID types.BlockID
+		messagePSH     types.PartSetHeader
 	}{
-		{false, 0, 0, "Valid Message", validSignedMsgType, validBlockID},
-		{true, -1, 0, "Invalid Message", validSignedMsgType, validBlockID},
-		{true, 0, -1, "Invalid Message", validSignedMsgType, validBlockID},
-		{true, 0, 0, "Invalid Message", invalidSignedMsgType, validBlockID},
-		{true, 0, 0, "Invalid Message", validSignedMsgType, invalidBlockID},
+		{false, 0, 0, "Valid Message", validSignedMsgType, validBlockID, validPSH},
+		{true, -1, 0, "Invalid Message", validSignedMsgType, validBlockID, validPSH},
+		{true, 0, -1, "Invalid Message", validSignedMsgType, validBlockID, validPSH},
+		{true, 0, 0, "Invalid Message", invalidSignedMsgType, validBlockID, validPSH},
+		{true, 0, 0, "Invalid Message", validSignedMsgType, invalidBlockID, invalidPSH},
 	}
 
 	for _, tc := range testCases {
@@ -942,10 +977,10 @@ func TestVoteSetBitsMessageValidateBasic(t *testing.T) {
 		{func(msg *VoteSetBitsMessage) {
 			msg.BlockID = types.BlockID{
 				Hash: bytes.HexBytes{},
-				PartSetHeader: types.PartSetHeader{
-					Total: 1,
-					Hash:  []byte{0},
-				},
+			}
+			msg.PartSetHeader = types.PartSetHeader{
+				Total: 1,
+				Hash:  []byte{0},
 			}
 		}, "wrong BlockID: wrong PartSetHeader: wrong Hash:"},
 		{func(msg *VoteSetBitsMessage) { msg.Votes = bits.NewBitArray(types.MaxVotesCount + 1) },
@@ -956,11 +991,12 @@ func TestVoteSetBitsMessageValidateBasic(t *testing.T) {
 		tc := tc
 		t.Run(fmt.Sprintf("#%d", i), func(t *testing.T) {
 			msg := &VoteSetBitsMessage{
-				Height:  1,
-				Round:   0,
-				Type:    0x01,
-				Votes:   bits.NewBitArray(1),
-				BlockID: types.BlockID{},
+				Height:        1,
+				Round:         0,
+				Type:          0x01,
+				Votes:         bits.NewBitArray(1),
+				BlockID:       types.BlockID{},
+				PartSetHeader: types.PartSetHeader{},
 			}
 
 			tc.malleateFn(msg)

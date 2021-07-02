@@ -79,7 +79,7 @@ func VerifyNonAdjacent(
 	// intentionally made very large to DOS the light client. not the case for
 	// VerifyAdjacent, where validator set is known in advance.
 	if err := untrustedVals.VerifyCommitLight(trustedHeader.ChainID, untrustedHeader.Commit.BlockID,
-		untrustedHeader.Height, untrustedHeader.Commit); err != nil {
+		untrustedHeader.Commit.PartSetHeader, untrustedHeader.Height, untrustedHeader.Commit); err != nil {
 		return ErrInvalidHeader{err}
 	}
 
@@ -139,7 +139,7 @@ func VerifyAdjacent(
 
 	// Ensure that +2/3 of new validators signed correctly.
 	if err := untrustedVals.VerifyCommitLight(trustedHeader.ChainID, untrustedHeader.Commit.BlockID,
-		untrustedHeader.Height, untrustedHeader.Commit); err != nil {
+		untrustedHeader.Commit.PartSetHeader, untrustedHeader.Height, untrustedHeader.Commit); err != nil {
 		return ErrInvalidHeader{err}
 	}
 
@@ -173,6 +173,13 @@ func ValidateTrustLevel(lvl tmmath.Fraction) error {
 		lvl.Numerator > lvl.Denominator || // > 1
 		lvl.Denominator == 0 {
 		return fmt.Errorf("trustLevel must be within [1/3, 1], given %v", lvl)
+	}
+	return nil
+}
+
+func ValidateNumSamples(numSamples uint32) error {
+	if numSamples == 0 {
+		return fmt.Errorf("number of samples must be > 0")
 	}
 	return nil
 }

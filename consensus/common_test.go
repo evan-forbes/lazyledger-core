@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -13,9 +14,12 @@ import (
 	"time"
 
 	"github.com/go-kit/kit/log/term"
+	"github.com/ipfs/go-blockservice"
+	offline "github.com/ipfs/go-ipfs-exchange-offline"
+	format "github.com/ipfs/go-ipld-format"
+	"github.com/ipfs/go-merkledag"
+	mdutils "github.com/ipfs/go-merkledag/test"
 	"github.com/stretchr/testify/require"
-
-	"path"
 
 	abcicli "github.com/lazyledger/lazyledger-core/abci/client"
 	"github.com/lazyledger/lazyledger-core/abci/example/counter"
@@ -23,6 +27,7 @@ import (
 	abci "github.com/lazyledger/lazyledger-core/abci/types"
 	cfg "github.com/lazyledger/lazyledger-core/config"
 	cstypes "github.com/lazyledger/lazyledger-core/consensus/types"
+	"github.com/lazyledger/lazyledger-core/ipfs"
 	tmbytes "github.com/lazyledger/lazyledger-core/libs/bytes"
 	dbm "github.com/lazyledger/lazyledger-core/libs/db"
 	"github.com/lazyledger/lazyledger-core/libs/db/memdb"
@@ -48,11 +53,11 @@ const (
 // test.
 type cleanupFunc func()
 
-// genesis, chain_id, priv_val
+// genesis, chain_id, priv_val, ipfsAPI
 var (
 	config                *cfg.Config // NOTE: must be reset for each _test.go file
 	consensusReplayConfig *cfg.Config
-	ensureTimeout         = 600 * time.Millisecond
+	ensureTimeout         = 4 * time.Second
 )
 
 func ensureDir(dir string, mode os.FileMode) {
@@ -103,7 +108,8 @@ func (vs *validatorStub) signVote(
 		Round:            vs.Round,
 		Timestamp:        tmtime.Now(),
 		Type:             voteType,
-		BlockID:          types.BlockID{Hash: hash, PartSetHeader: header},
+		BlockID:          types.BlockID{Hash: hash},
+		PartSetHeader:    header,
 	}
 	v := vote.ToProto()
 	err = vs.PrivValidator.SignVote(config.ChainID(), v)
@@ -200,8 +206,8 @@ func decideProposal(
 	}
 
 	// Make proposal
-	polRound, propBlockID := validRound, types.BlockID{Hash: block.Hash(), PartSetHeader: blockParts.Header()}
-	proposal = types.NewProposal(height, round, polRound, propBlockID, &block.DataAvailabilityHeader)
+	polRound, propBlockID := validRound, types.BlockID{Hash: block.Hash()}
+	proposal = types.NewProposal(height, round, polRound, propBlockID, &block.DataAvailabilityHeader, blockParts.Header())
 	p, err := proposal.ToProto()
 	if err != nil {
 		panic(err)
@@ -352,7 +358,7 @@ func subscribeToVoter(cs *State, addr []byte) <-chan tmpubsub.Message {
 //-------------------------------------------------------------------------------
 // consensus states
 
-func newState(state sm.State, pv types.PrivValidator, app abci.Application) *State {
+func newState(state sm.State, pv types.PrivValidator, app abci.Application, ipfsDagAPI format.DAGService) *State {
 	config := cfg.ResetTestRoot("consensus_state_test")
 	return newStateWithConfig(config, state, pv, app)
 }
@@ -375,7 +381,9 @@ func newStateWithConfigAndBlockStore(
 	blockDB dbm.DB,
 ) *State {
 	// Get BlockStore
-	blockStore := store.NewBlockStore(blockDB)
+	bs := ipfs.MockBlockStore()
+	dag := merkledag.NewDAGService(blockservice.New(bs, offline.Exchange(bs)))
+	blockStore := store.NewBlockStore(blockDB, bs, log.TestingLogger())
 
 	// one for mempool, one for consensus
 	mtx := new(tmsync.Mutex)
@@ -399,7 +407,7 @@ func newStateWithConfigAndBlockStore(
 	}
 
 	blockExec := sm.NewBlockExecutor(stateStore, log.TestingLogger(), proxyAppConnCon, mempool, evpool)
-	cs := NewState(thisConfig.Consensus, state, blockExec, blockStore, mempool, evpool)
+	cs := NewState(thisConfig.Consensus, state, blockExec, blockStore, mempool, dag, ipfs.MockRouting(), evpool)
 	cs.SetLogger(log.TestingLogger().With("module", "consensus"))
 	cs.SetPrivValidator(pv)
 
@@ -431,7 +439,7 @@ func randState(nValidators int) (*State, []*validatorStub) {
 
 	vss := make([]*validatorStub, nValidators)
 
-	cs := newState(state, privVals[0], counter.NewApplication(true))
+	cs := newState(state, privVals[0], counter.NewApplication(true), mdutils.Mock())
 
 	for i := 0; i < nValidators; i++ {
 		vss[i] = newValidatorStub(privVals[i], int32(i))
@@ -592,7 +600,7 @@ func ensureNewUnlock(unlockCh <-chan tmpubsub.Message, height int64, round int32
 		"Timeout expired while waiting for NewUnlock event")
 }
 
-func ensureProposal(proposalCh <-chan tmpubsub.Message, height int64, round int32, propID types.BlockID) {
+func ensureProposal(proposalCh <-chan tmpubsub.Message, height int64, round int32, propID types.BlockID, propPartSetHeader types.PartSetHeader) {
 	select {
 	case <-time.After(ensureTimeout):
 		panic("Timeout expired while waiting for NewProposal event")
@@ -608,7 +616,7 @@ func ensureProposal(proposalCh <-chan tmpubsub.Message, height int64, round int3
 		if proposalEvent.Round != round {
 			panic(fmt.Sprintf("expected round %v, got %v", round, proposalEvent.Round))
 		}
-		if !proposalEvent.BlockID.Equals(propID) {
+		if !proposalEvent.BlockID.Equals(propID) || !proposalEvent.PartSetHeader.Equals(propPartSetHeader) {
 			panic(fmt.Sprintf("Proposed block does not match expected block (%v != %v)", proposalEvent.BlockID, propID))
 		}
 	}
@@ -678,9 +686,15 @@ func consensusLogger() log.Logger {
 	}).With("module", "consensus")
 }
 
-func randConsensusNet(nValidators int, testName string, tickerFunc func() TimeoutTicker,
-	appFunc func() abci.Application, configOpts ...func(*cfg.Config)) ([]*State, cleanupFunc) {
+func randConsensusNet(
+	nValidators int,
+	testName string,
+	tickerFunc func() TimeoutTicker,
+	appFunc func() abci.Application,
+	configOpts ...func(*cfg.Config),
+) ([]*State, cleanupFunc) {
 	genDoc, privVals := randGenesisDoc(nValidators, false, 30)
+
 	css := make([]*State, nValidators)
 	logger := consensusLogger()
 	configRootDirs := make([]string, 0, nValidators)
@@ -722,6 +736,7 @@ func randConsensusNetWithPeers(
 	logger := consensusLogger()
 	var peer0Config *cfg.Config
 	configRootDirs := make([]string, 0, nPeers)
+
 	for i := 0; i < nPeers; i++ {
 		stateDB := memdb.NewDB() // each state needs its own db
 		stateStore := sm.NewStore(stateDB)
