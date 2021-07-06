@@ -9,7 +9,7 @@ import (
 
 // InitRepo initialize IPFS repository under the given path.
 // It does nothing if repo is already created.
-func InitRepo(path string, logger log.Logger) error {
+func InitRepo(path string, logger log.Logger, bootstraps ...string) error {
 	if fsrepo.IsInitialized(path) {
 		logger.Info("IPFS is already initialized", "ipfs-path", path)
 		return nil
@@ -27,6 +27,10 @@ func InitRepo(path string, logger log.Logger) error {
 	cfg, err := DefaultFullNodeConfig()
 	if err != nil {
 		return err
+	}
+
+	if len(bootstraps) != 0 {
+		cfg.Bootstrap = bootstraps
 	}
 
 	if err := fsrepo.Init(path, cfg); err != nil {

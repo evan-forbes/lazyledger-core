@@ -6,7 +6,8 @@ import "path/filepath"
 // spun up by the tendermint node.
 // It is mostly concerned about port configuration (Addresses).
 type Config struct {
-	RootDir string
+	RootDir    string
+	Bootstraps []string
 	// is where the generated IPFS config and files will be stored.
 	// The default is ~/.tendermint/ipfs.
 	RepoPath string `mapstructure:"repo-path"`
