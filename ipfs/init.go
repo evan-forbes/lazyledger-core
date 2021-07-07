@@ -37,6 +37,6 @@ func InitRepo(path string, logger log.Logger, bootstraps ...string) error {
 		return err
 	}
 
-	logger.Info("Successfully initialized IPFS repository", "ipfs-path", path)
+	logger.Info("Successfully initialized IPFS repository", "ipfs-path", path, cfg.Identity.PeerID)
 	return nil
 }
