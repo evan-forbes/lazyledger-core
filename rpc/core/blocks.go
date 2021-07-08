@@ -89,7 +89,10 @@ func Block(ctx *rpctypes.Context, heightPtr *int64) (*ctypes.ResultBlock, error)
 		return nil, err
 	}
 
-	block := env.BlockStore.LoadBlock(height)
+	block, err := env.BlockStore.LoadBlock(ctx.Context(), height)
+	if err != nil {
+		return &ctypes.ResultBlock{BlockID: types.BlockID{}, Block: block}, err
+	}
 	blockMeta := env.BlockStore.LoadBlockMeta(height)
 	if blockMeta == nil {
 		return &ctypes.ResultBlock{BlockID: types.BlockID{}, Block: block}, nil
@@ -100,7 +103,10 @@ func Block(ctx *rpctypes.Context, heightPtr *int64) (*ctypes.ResultBlock, error)
 // BlockByHash gets block by hash.
 // More: https://docs.tendermint.com/master/rpc/#/Info/block_by_hash
 func BlockByHash(ctx *rpctypes.Context, hash []byte) (*ctypes.ResultBlock, error) {
-	block := env.BlockStore.LoadBlockByHash(hash)
+	block, err := env.BlockStore.LoadBlockByHash(ctx.Context(), hash)
+	if err != nil {
+		return &ctypes.ResultBlock{BlockID: types.BlockID{}, Block: nil}, err
+	}
 	if block == nil {
 		return &ctypes.ResultBlock{BlockID: types.BlockID{}, Block: nil}, nil
 	}
@@ -134,6 +140,30 @@ func Commit(ctx *rpctypes.Context, heightPtr *int64) (*ctypes.ResultCommit, erro
 	// Return the canonical commit (comes from the block at height+1)
 	commit := env.BlockStore.LoadBlockCommit(height)
 	return ctypes.NewResultCommit(&header, commit, true), nil
+}
+
+// DataAvailabilityHeader TODO
+func DataAvailabilityHeader(ctx *rpctypes.Context, heightPtr *int64) (*ctypes.ResultDataAvailabilityHeader, error) {
+	height, err := getHeight(env.BlockStore.Height(), heightPtr)
+	if err != nil {
+		return nil, err
+	}
+
+	// TODO: store DAHeader to avoid loading the full block each time
+	// depends on either:
+	// - https://github.com/lazyledger/lazyledger-core/pull/312, or
+	// - https://github.com/lazyledger/lazyledger-core/pull/218
+	block, err := env.BlockStore.LoadBlock(ctx.Context(), height)
+	if err != nil {
+		return &ctypes.ResultDataAvailabilityHeader{
+			DataAvailabilityHeader: types.DataAvailabilityHeader{},
+		}, err
+	}
+	_ = block.Hash()
+	dah := block.DataAvailabilityHeader
+	return &ctypes.ResultDataAvailabilityHeader{
+		DataAvailabilityHeader: dah,
+	}, nil
 }
 
 // BlockResults gets ABCIResults at a given height.

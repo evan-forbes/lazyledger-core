@@ -1,19 +1,13 @@
-package ipld
+package wrapper
 
 import (
-	"bytes"
-	"crypto/sha256"
 	"fmt"
 
 	"github.com/lazyledger/nmt"
-	"github.com/lazyledger/nmt/namespace"
 	"github.com/lazyledger/rsmt2d"
 
-	"github.com/lazyledger/lazyledger-core/types"
+	"github.com/lazyledger/lazyledger-core/types/consts"
 )
-
-// emptyNamepsaceID occurs when a share is empty and indicates that
-var emptyNamespaceID = namespace.ID{0, 0, 0, 0, 0, 0, 0, 0}
 
 // Fulfills the rsmt2d.Tree interface and rsmt2d.TreeConstructorFn function
 var _ rsmt2d.TreeConstructorFn = ErasuredNamespacedMerkleTree{}.Constructor
@@ -37,7 +31,7 @@ func NewErasuredNamespacedMerkleTree(squareSize uint64, setters ...nmt.Option) E
 	if squareSize == 0 {
 		panic("cannot create a ErasuredNamespacedMerkleTree of squareSize == 0")
 	}
-	tree := nmt.New(sha256.New(), setters...)
+	tree := nmt.New(consts.NewBaseHashFunc, setters...)
 	return ErasuredNamespacedMerkleTree{squareSize: squareSize, options: setters, tree: tree}
 }
 
@@ -54,28 +48,17 @@ func (w ErasuredNamespacedMerkleTree) Constructor() rsmt2d.Tree {
 // rsmt.Tree interface. NOTE: panics if an error is encountered while pushing or
 // if the tree size is exceeded.
 func (w *ErasuredNamespacedMerkleTree) Push(data []byte, idx rsmt2d.SquareIndex) {
-	// determine the namespace based on where in the tree we're pushing
-	nsID := make(namespace.ID, types.NamespaceSize)
-
 	if idx.Axis+1 > 2*uint(w.squareSize) || idx.Cell+1 > 2*uint(w.squareSize) {
 		panic(fmt.Sprintf("pushed past predetermined square size: boundary at %d index at %+v", 2*w.squareSize, idx))
 	}
-
-	// use the parity namespace if the cell is not in Q0 of the extended
-	// datasquare if the cell is empty it means we got an empty block so we need
-	// to use TailPaddingNamespaceID
+	nidAndData := make([]byte, consts.NamespaceSize+len(data))
+	copy(nidAndData[consts.NamespaceSize:], data)
+	// use the parity namespace if the cell is not in Q0 of the extended data square
 	if idx.Axis+1 > uint(w.squareSize) || idx.Cell+1 > uint(w.squareSize) {
-		copy(nsID, types.ParitySharesNamespaceID)
+		copy(nidAndData[:consts.NamespaceSize], consts.ParitySharesNamespaceID)
 	} else {
-		// empty shares use the TailPaddingNamespaceID if the data is empty, so
-		// here we check if the share is empty (namepsace == [0,0,0,0,0,0,0,0])
-		if bytes.Equal(data[:types.NamespaceSize], emptyNamespaceID) {
-			copy(nsID, types.TailPaddingNamespaceID)
-		} else {
-			copy(nsID, data[:types.NamespaceSize])
-		}
+		copy(nidAndData[:consts.NamespaceSize], data[:consts.NamespaceSize])
 	}
-	nidAndData := append(append(make([]byte, 0, types.NamespaceSize+len(data)), nsID...), data...)
 	// push to the underlying tree
 	err := w.tree.Push(nidAndData)
 	// panic on error
